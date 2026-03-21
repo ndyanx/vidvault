@@ -4,71 +4,80 @@ import { useVideoLibrary } from '../composables/useVideoLibrary.js'
 import VideoSkeleton from './VideoSkeleton.vue'
 import VideoModal from './VideoModal.vue'
 
-const { videos, isLoading, updateVideoDimensions } = useVideoLibrary()
+const { videos, isLoading } = useVideoLibrary()
 
-// ─── Progressive render ────────────────────────────────────────────────────
-// Same strategy as the original: render INITIAL_RENDER first, then add
-// BATCH_SIZE per idle frame so the thread never blocks on large libraries.
-const INITIAL_RENDER = 20
-const BATCH_SIZE = 20
-const renderedCount = ref(INITIAL_RENDER)
-let idleCallbackId = null
-let isMounted = false
+// ─── Constants ────────────────────────────────────────────────────────────
+const GAP = 10 // px gap between cards
+const VIEWPORT_MARGIN = 600 // px above/below viewport to keep rendered
+const DEFAULT_RATIO = 9 / 16 // fallback aspect ratio (portrait)
 
-const scheduleProgressiveRender = () => {
-  if (renderedCount.value >= videos.value.length) return
-  const tick = () => {
-    renderedCount.value = Math.min(renderedCount.value + BATCH_SIZE, videos.value.length)
-    if (renderedCount.value < videos.value.length) {
-      idleCallbackId = requestIdleCallback(tick, { timeout: 300 })
-    }
+// ─── Refs ──────────────────────────────────────────────────────────────────
+const rootRef = ref(null)
+const colCount = ref(4)
+const colWidth = ref(200) // computed from container width
+const scrollTop = ref(0)
+const containerHeight = ref(0) // total scrollable height
+
+// ─── Layout: precalculated positions ──────────────────────────────────────
+// layoutItems[i] = { video, x, y, width, height, colIndex }
+// Computed once per (videos, colCount, colWidth) change.
+// x/y are absolute pixel positions within the scroll container.
+const layoutItems = ref([])
+
+function buildLayout(vids, cols, cw) {
+  if (!cw || !cols || !vids.length) {
+    layoutItems.value = []
+    containerHeight.value = 0
+    return
   }
-  idleCallbackId = requestIdleCallback(tick, { timeout: 300 })
+
+  // Track the current bottom Y of each column
+  const colHeights = new Array(cols).fill(0)
+  const items = []
+
+  for (let i = 0; i < vids.length; i++) {
+    const video = vids[i]
+
+    // Pick the shortest column to place this card
+    let minCol = 0
+    for (let c = 1; c < cols; c++) {
+      if (colHeights[c] < colHeights[minCol]) minCol = c
+    }
+
+    // Card dimensions
+    const ratio = video.width && video.height ? video.width / video.height : DEFAULT_RATIO
+    const cardHeight = Math.round(cw / ratio)
+    const x = minCol * (cw + GAP)
+    const y = colHeights[minCol]
+
+    items.push({ video, x, y, width: cw, height: cardHeight, colIndex: minCol })
+
+    colHeights[minCol] += cardHeight + GAP
+  }
+
+  layoutItems.value = items
+  containerHeight.value = Math.max(...colHeights)
 }
 
-// Watch for library changes (new folder loaded)
-let prevSignature = ''
-const getSignature = (vs) => vs.map((v) => v.id).join('|')
+// ─── Visible items (virtualization) ───────────────────────────────────────
+// Only items whose Y range intersects (scrollTop - margin) to (scrollTop + viewportH + margin)
+const viewportHeight = ref(800)
 
-watch(
-  videos,
-  (newVideos) => {
-    if (!isMounted) return
-    const sig = getSignature(newVideos)
-    if (sig === prevSignature) return
-    prevSignature = sig
+const visibleItems = computed(() => {
+  const top = scrollTop.value - VIEWPORT_MARGIN
+  const bottom = scrollTop.value + viewportHeight.value + VIEWPORT_MARGIN
+  return layoutItems.value.filter((item) => {
+    const itemBottom = item.y + item.height
+    return itemBottom > top && item.y < bottom
+  })
+})
 
-    if (idleCallbackId) cancelIdleCallback(idleCallbackId)
-    renderedCount.value = INITIAL_RENDER
-    rebuildColumns(INITIAL_RENDER, colCount.value)
-    scheduleProgressiveRender()
-  },
-  { flush: 'post' }
-)
-
-// ─── Aspect ratio ──────────────────────────────────────────────────────────
-const runtimeRatios = ref({})
-
-const getCardAspect = (video) => {
-  if (video.width && video.height) return `${video.width} / ${video.height}`
-  if (runtimeRatios.value[video.id]) return `${runtimeRatios.value[video.id]} / 1`
-  return '9 / 16' // default portrait until metadata loads
-}
-
-const handleMetadata = (e, video) => {
-  const { videoWidth, videoHeight } = e.target
-  if (!videoWidth || !videoHeight) return
-  if (video.width && video.height) return
-
-  const ratio = videoWidth / videoHeight
-  runtimeRatios.value = { ...runtimeRatios.value, [video.id]: ratio }
-  updateVideoDimensions(video.id, videoWidth, videoHeight)
+// ─── Scroll handler ────────────────────────────────────────────────────────
+const handleScroll = (e) => {
+  scrollTop.value = e.target.scrollTop
 }
 
 // ─── Responsive columns via ResizeObserver ─────────────────────────────────
-const rootRef = ref(null)
-const colCount = ref(4)
-
 const getColsForWidth = (w) => {
   if (w < 480) return 1
   if (w < 720) return 2
@@ -77,56 +86,38 @@ const getColsForWidth = (w) => {
   return 5
 }
 
-// ─── Column distribution (incremental O(batch), not O(n²)) ────────────────
-const columnArrays = ref(Array.from({ length: colCount.value }, () => []))
-
-const rebuildColumns = (count, cols) => {
-  const result = Array.from({ length: cols }, () => [])
-  videos.value.slice(0, count).forEach((v, i) => result[i % cols].push(v))
-  columnArrays.value = result
+const updateLayout = () => {
+  if (!rootRef.value) return
+  const w = rootRef.value.clientWidth - 32 // subtract padding
+  viewportHeight.value = rootRef.value.clientHeight
+  const cols = getColsForWidth(w)
+  const cw = Math.floor((w - (cols - 1) * GAP) / cols)
+  colCount.value = cols
+  colWidth.value = cw
+  buildLayout(videos.value, cols, cw)
 }
-
-watch(
-  colCount,
-  (newCols) => {
-    rebuildColumns(renderedCount.value, newCols)
-  },
-  { flush: 'post' }
-)
-
-watch(
-  renderedCount,
-  (newCount, oldCount) => {
-    if (newCount <= oldCount) return
-    const cols = colCount.value
-    const newVideos = videos.value.slice(oldCount, newCount)
-    newVideos.forEach((v, i) => {
-      columnArrays.value[(oldCount + i) % cols].push(v)
-    })
-    columnArrays.value = [...columnArrays.value]
-  },
-  { flush: 'post' }
-)
 
 let resizeObserver = null
 const initResizeObserver = () => {
-  if (!rootRef.value) return
-  const w = rootRef.value.offsetWidth || window.innerWidth
-  colCount.value = getColsForWidth(w)
-  resizeObserver = new ResizeObserver((entries) => {
-    for (const entry of entries) {
-      const width = entry.contentRect.width
-      if (width > 0) colCount.value = getColsForWidth(width)
-    }
-  })
-  resizeObserver.observe(rootRef.value)
+  resizeObserver = new ResizeObserver(() => updateLayout())
+  if (rootRef.value) resizeObserver.observe(rootRef.value)
 }
 
-// ─── IntersectionObserver (play/pause on viewport) ─────────────────────────
-const visibleMap = ref({})
+// ─── Rebuild layout when videos change ────────────────────────────────────
+watch(
+  videos,
+  () => {
+    nextTick(() => updateLayout())
+  },
+  { flush: 'post' }
+)
+
+// ─── Video playback (IntersectionObserver on rendered cards) ──────────────
+// Only the ~40-50 rendered cards get observed at any time.
 const videoEls = {}
 const playTimers = {}
-const PLAY_DELAY = 1800 // ms before autoplay starts
+const PLAY_DELAY = 1500
+const visibleMap = ref({})
 
 const schedulePlay = (id) => {
   if (playTimers[id]) return
@@ -143,15 +134,6 @@ const cancelPlay = (id) => {
   }
 }
 
-const setCardRef = (el) => {
-  if (el) intersectionObserver?.observe(el)
-}
-
-const setVideoRef = (el, id) => {
-  if (el) videoEls[id] = el
-  else delete videoEls[id]
-}
-
 let intersectionObserver = null
 
 const initIntersectionObserver = () => {
@@ -159,7 +141,6 @@ const initIntersectionObserver = () => {
     (entries) => {
       const next = { ...visibleMap.value }
       let changed = false
-
       entries.forEach((entry) => {
         const id = entry.target.dataset.videoid
         if (!id) return
@@ -178,22 +159,40 @@ const initIntersectionObserver = () => {
           videoEls[id]?.pause()
         }
       })
-
       if (changed) visibleMap.value = next
     },
     { rootMargin: '200px 0px 200px 0px', threshold: 0 }
   )
 }
 
-// ─── Skeleton state ────────────────────────────────────────────────────────
-// Show skeleton during loading OR during the initial progressive render
-const showSkeleton = computed(() => isLoading.value)
+// Card ref callback — observe with IntersectionObserver
+const cardRefs = {}
+const setCardRef = (el, id) => {
+  if (el && !cardRefs[id]) {
+    cardRefs[id] = el
+    intersectionObserver?.observe(el)
+  } else if (!el && cardRefs[id]) {
+    intersectionObserver?.unobserve(cardRefs[id])
+    delete cardRefs[id]
+    // Clean up video and timers when card is virtualized away
+    cancelPlay(id)
+    videoEls[id]?.pause()
+    delete videoEls[id]
+    const next = { ...visibleMap.value }
+    delete next[id]
+    visibleMap.value = next
+  }
+}
+
+const setVideoRef = (el, id) => {
+  if (el) videoEls[id] = el
+  else delete videoEls[id]
+}
 
 // ─── Modal ─────────────────────────────────────────────────────────────────
 const modalVideo = ref(null)
 
 const openModal = (video) => {
-  // Pause all grid videos
   Object.values(videoEls).forEach((el) => el?.pause())
   Object.keys(playTimers).forEach((id) => cancelPlay(id))
   modalVideo.value = video
@@ -201,7 +200,6 @@ const openModal = (video) => {
 
 const closeModal = () => {
   modalVideo.value = null
-  // Resume visible videos after modal closes
   nextTick(() => {
     Object.entries(visibleMap.value).forEach(([id, visible]) => {
       if (visible) schedulePlay(id)
@@ -209,100 +207,95 @@ const closeModal = () => {
   })
 }
 
-// ─── Lifecycle ────────────────────────────────────────────────────────────
+// ─── Lifecycle ─────────────────────────────────────────────────────────────
 onMounted(() => {
-  isMounted = true
   initResizeObserver()
   initIntersectionObserver()
-
-  if (videos.value.length > 0) {
-    prevSignature = getSignature(videos.value)
-    rebuildColumns(INITIAL_RENDER, colCount.value)
-    scheduleProgressiveRender()
-  }
+  updateLayout()
 })
 
 onUnmounted(() => {
   resizeObserver?.disconnect()
   intersectionObserver?.disconnect()
-  if (idleCallbackId) cancelIdleCallback(idleCallbackId)
   Object.keys(playTimers).forEach((id) => cancelPlay(id))
 })
 </script>
 
 <template>
-  <div class="gallery-root" ref="rootRef">
+  <div class="gallery-root" ref="rootRef" @scroll="handleScroll">
     <!-- Skeleton while loading -->
-    <VideoSkeleton v-if="showSkeleton" :count="16" :cols="colCount" />
+    <VideoSkeleton v-if="isLoading" :count="16" :cols="colCount" />
 
-    <!-- Masonry grid -->
-    <div v-else class="gallery-masonry" :class="{ 'modal-open': !!modalVideo }">
-      <div v-for="(col, colIdx) in columnArrays" :key="colIdx" class="gallery-col">
-        <div
-          v-for="video in col"
-          :key="video.id"
-          class="gallery-card"
-          :data-videoid="video.id"
-          :ref="(el) => setCardRef(el)"
-          @click="openModal(video)"
-        >
-          <!-- Aspect ratio sizer -->
-          <div class="card-ratio" :style="{ aspectRatio: getCardAspect(video) }">
-            <!-- Skeleton shimmer until video metadata loads -->
-            <div v-if="!runtimeRatios[video.id] && !video.width" class="card-skeleton">
-              <div class="card-shimmer" />
-            </div>
+    <!-- Virtual canvas: fixed height = total layout height + footer -->
+    <div
+      v-else-if="layoutItems.length"
+      class="gallery-canvas"
+      :style="{ height: containerHeight + 56 + 'px' }"
+    >
+      <!-- Only render visible items -->
+      <div
+        v-for="item in visibleItems"
+        :key="item.video.id"
+        class="gallery-card"
+        :data-videoid="item.video.id"
+        :ref="(el) => setCardRef(el, item.video.id)"
+        :style="{
+          position: 'absolute',
+          left: item.x + 'px',
+          top: item.y + 'px',
+          width: item.width + 'px',
+          height: item.height + 'px'
+        }"
+        @click="openModal(item.video)"
+      >
+        <!-- Video element -->
+        <video
+          v-if="visibleMap[item.video.id]"
+          :ref="(el) => setVideoRef(el, item.video.id)"
+          :src="item.video.videoUrl"
+          muted
+          loop
+          playsinline
+          preload="metadata"
+          class="card-video"
+        />
 
-            <!-- Video element -->
-            <video
-              v-if="visibleMap[video.id]"
-              :ref="(el) => setVideoRef(el, video.id)"
-              :src="video.videoUrl"
-              muted
-              loop
-              playsinline
-              preload="metadata"
-              class="card-video"
-              @loadedmetadata="handleMetadata($event, video)"
-            />
+        <!-- Placeholder when card is rendered but not yet intersecting -->
+        <div v-else class="card-placeholder" />
 
-            <!-- Placeholder when off-screen -->
-            <div v-else class="card-placeholder" />
-
-            <!-- Hover overlay with filename -->
-            <div class="card-overlay">
-              <span class="card-filename">{{ video.fileName }}</span>
-              <div class="card-meta-row">
-                <span class="card-ext">{{ video.ext }}</span>
-                <span class="card-size">{{ video.sizeFormatted }}</span>
-              </div>
-            </div>
-
-            <!-- Play icon on hover -->
-            <div class="card-play-icon">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                <polygon points="5 3 19 12 5 21 5 3" />
-              </svg>
-            </div>
+        <!-- Hover overlay -->
+        <div class="card-overlay">
+          <span class="card-filename">{{ item.video.fileName }}</span>
+          <div class="card-meta-row">
+            <span class="card-ext">{{ item.video.ext }}</span>
+            <span class="card-size">{{ item.video.sizeFormatted }}</span>
           </div>
         </div>
+
+        <!-- Play icon -->
+        <div class="card-play-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+        </div>
+      </div>
+
+      <!-- Footer inside canvas, absolutely positioned below last card -->
+      <div
+        class="gallery-footer"
+        :class="{ 'modal-open': !!modalVideo }"
+        :style="{ top: containerHeight + 8 + 'px' }"
+      >
+        {{ videos.length }} video{{ videos.length !== 1 ? 's' : '' }} · {{ visibleItems.length }} en
+        pantalla
       </div>
     </div>
 
-    <!-- Footer count -->
-    <div
-      v-if="!showSkeleton && videos.length > 0"
-      class="gallery-footer"
-      :class="{ 'modal-open': !!modalVideo }"
-    >
-      {{
-        renderedCount < videos.length
-          ? `Mostrando ${renderedCount} de ${videos.length} videos…`
-          : `${videos.length} video${videos.length !== 1 ? 's' : ''}`
-      }}
+    <!-- Empty (folder loaded but no videos found) -->
+    <div v-else-if="!isLoading" class="gallery-empty">
+      <p>No se encontraron videos en esta carpeta.</p>
     </div>
 
-    <!-- Modal -->
     <VideoModal :video="modalVideo" @close="closeModal" />
   </div>
 </template>
@@ -313,50 +306,23 @@ onUnmounted(() => {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 16px;
+  position: relative;
   scroll-behavior: smooth;
 }
 
-/* ─── Masonry ─────────────────────────────────────────────────────────────── */
-.gallery-masonry {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
+/* The canvas fills the total layout height so the scrollbar is correct */
+.gallery-canvas {
   position: relative;
-}
-
-/* Dim overlay behind modal using ::after — avoids repainting all children */
-.gallery-masonry::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0);
-  pointer-events: none;
-  z-index: 1999;
-  transition: background 0.25s ease;
-}
-
-.gallery-masonry.modal-open::after {
-  background: rgba(0, 0, 0, 0.5);
-  pointer-events: auto;
-}
-
-.gallery-col {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  width: 100%;
 }
 
 /* ─── Card ────────────────────────────────────────────────────────────────── */
 .gallery-card {
-  width: 100%;
   border-radius: var(--radius-md);
   overflow: hidden;
   cursor: pointer;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
-  flex-shrink: 0;
   transition:
     transform 0.2s ease,
     box-shadow 0.2s ease,
@@ -368,22 +334,15 @@ onUnmounted(() => {
   transform: scale(1.018);
   box-shadow: var(--shadow-lg);
   border-color: transparent;
+  z-index: 10;
 }
 
 .gallery-card:hover .card-overlay {
   opacity: 1;
 }
-
 .gallery-card:hover .card-play-icon {
   opacity: 1;
   transform: translate(-50%, -50%) scale(1);
-}
-
-/* ─── Card ratio wrapper ──────────────────────────────────────────────────── */
-.card-ratio {
-  width: 100%;
-  position: relative;
-  overflow: hidden;
 }
 
 /* ─── Video & placeholder ─────────────────────────────────────────────────── */
@@ -399,32 +358,6 @@ onUnmounted(() => {
 
 .card-placeholder {
   background: var(--bg-elevated);
-}
-
-/* ─── Per-card skeleton shimmer ───────────────────────────────────────────── */
-.card-skeleton {
-  position: absolute;
-  inset: 0;
-  background: var(--bg-elevated);
-  overflow: hidden;
-  z-index: 1;
-}
-
-.card-shimmer {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(105deg, transparent 35%, var(--border-medium) 50%, transparent 65%);
-  background-size: 200% 100%;
-  animation: card-shimmer 1.6s ease-in-out infinite;
-}
-
-@keyframes card-shimmer {
-  0% {
-    background-position: -200% 0;
-  }
-  100% {
-    background-position: 200% 0;
-  }
 }
 
 /* ─── Overlay ─────────────────────────────────────────────────────────────── */
@@ -445,7 +378,6 @@ onUnmounted(() => {
   display: block;
   font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 400;
   color: rgba(255, 255, 255, 0.9);
   white-space: nowrap;
   overflow: hidden;
@@ -494,23 +426,37 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding-left: 3px; /* optical centering of triangle */
+  padding-left: 3px;
   z-index: 3;
   pointer-events: none;
 }
 
 /* ─── Footer ──────────────────────────────────────────────────────────────── */
 .gallery-footer {
+  position: absolute;
+  left: 0;
+  right: 0;
   text-align: center;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-tertiary);
-  padding: 24px 0 12px;
-  transition: opacity 0.25s ease;
+  padding: 16px 0;
   letter-spacing: 0.03em;
+  transition: opacity 0.25s;
 }
 
 .gallery-footer.modal-open {
   opacity: 0;
+}
+
+/* ─── Empty ───────────────────────────────────────────────────────────────── */
+.gallery-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-tertiary);
 }
 </style>

@@ -1,9 +1,21 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { readdirSync, statSync, createReadStream } from 'fs'
+import {
+  readdirSync,
+  statSync,
+  createReadStream,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync
+} from 'fs'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 
-// ─── Video extensions supported ───────────────────────────────────────────
+const execFileAsync = promisify(execFile)
+
+// ─── Video extensions ──────────────────────────────────────────────────────
 const VIDEO_EXTENSIONS = new Set([
   '.mp4',
   '.mov',
@@ -18,7 +30,6 @@ const VIDEO_EXTENSIONS = new Set([
   '.mts'
 ])
 
-// MIME types for video seeking headers
 const MIME_TYPES = {
   '.mp4': 'video/mp4',
   '.mov': 'video/quicktime',
@@ -33,7 +44,7 @@ const MIME_TYPES = {
   '.mts': 'video/mp2t'
 }
 
-// ─── Register custom protocol BEFORE app ready ────────────────────────────
+// ─── Register protocol before app ready ───────────────────────────────────
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'localvideo',
@@ -47,6 +58,100 @@ protocol.registerSchemesAsPrivileged([
   }
 ])
 
+// ─── Cache helpers ─────────────────────────────────────────────────────────
+// Cache lives in %APPDATA%/vidvault/dimensions-cache.json
+// Each entry key = filePath, value = { width, height, mtime }
+// If mtime matches the current file mtime, the cached dimensions are valid.
+
+function getCachePath() {
+  const userDataPath = app.getPath('userData')
+  return join(userDataPath, 'dimensions-cache.json')
+}
+
+function loadCache() {
+  try {
+    const cachePath = getCachePath()
+    if (existsSync(cachePath)) {
+      return JSON.parse(readFileSync(cachePath, 'utf-8'))
+    }
+  } catch {
+    // corrupt cache — start fresh
+  }
+  return {}
+}
+
+function saveCache(cache) {
+  try {
+    const cachePath = getCachePath()
+    const dir = join(cachePath, '..')
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    writeFileSync(cachePath, JSON.stringify(cache), 'utf-8')
+  } catch (err) {
+    console.error('[cache] Failed to save:', err)
+  }
+}
+
+// ─── ffprobe ───────────────────────────────────────────────────────────────
+async function getVideoDimensions(filePath) {
+  try {
+    const { stdout } = await execFileAsync(
+      'ffprobe',
+      [
+        '-v',
+        'quiet',
+        '-print_format',
+        'json',
+        '-show_streams',
+        '-select_streams',
+        'v:0', // only first video stream
+        filePath
+      ],
+      { timeout: 8000 }
+    )
+
+    const data = JSON.parse(stdout)
+    const stream = data.streams?.[0]
+    if (!stream) return null
+
+    // Some videos store dimensions rotated — handle display rotation
+    const width = stream.coded_width || stream.width
+    const height = stream.coded_height || stream.height
+
+    // Check for rotation tag (common in phone recordings)
+    const rotation = Math.abs(
+      parseInt(stream.tags?.rotate || stream.side_data_list?.[0]?.rotation || '0', 10)
+    )
+    const isRotated = rotation === 90 || rotation === 270
+
+    return {
+      width: isRotated ? height : width,
+      height: isRotated ? width : height,
+      duration: parseFloat(stream.duration) || null
+    }
+  } catch {
+    return null
+  }
+}
+
+// ─── Concurrency limiter ───────────────────────────────────────────────────
+// Runs async tasks with at most `limit` running at once.
+async function runWithConcurrency(tasks, limit) {
+  const results = new Array(tasks.length)
+  let index = 0
+
+  const worker = async () => {
+    while (index < tasks.length) {
+      const current = index++
+      results[current] = await tasks[current]()
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, worker)
+  await Promise.all(workers)
+  return results
+}
+
+// ─── Window ────────────────────────────────────────────────────────────────
 function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
@@ -73,19 +178,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  // ─── Protocol handler with Range Request support ─────────────────────
-  // This is what allows the <video> element to seek (jump to any point).
-  //
-  // How seeking works:
-  //   1. <video> wants to jump to minute 2:30
-  //   2. Browser sends: Range: bytes=5242880-   (from byte 5MB onwards)
-  //   3. We open a ReadStream starting at that byte offset
-  //   4. We respond with 206 Partial Content + the correct byte range
-  //   5. Video plays from that point instantly
-  //
-  // Without this, net.fetch(file://) responds with the full file every
-  // time, causing seeks to hang or silently fail.
-
+  // ─── localvideo:// protocol with Range Request support ────────────────
   protocol.handle('localvideo', (request) => {
     try {
       const encoded = request.url.slice('localvideo://local/'.length)
@@ -101,39 +194,25 @@ app.whenReady().then(() => {
       const fileSize = stat.size
       const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase()
       const mimeType = MIME_TYPES[ext] || 'video/mp4'
-
-      // ── Parse Range header ──────────────────────────────────────────
-      // Format: "bytes=START-END" or "bytes=START-" (open-ended)
       const rangeHeader = request.headers.get('range')
 
       if (rangeHeader) {
         const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
-        if (!match) {
-          return new Response('Invalid Range', { status: 416 })
-        }
+        if (!match) return new Response('Invalid Range', { status: 416 })
 
         const start = parseInt(match[1], 10)
-        // If end is omitted, serve until the end of file.
-        // Clamp to fileSize - 1 to avoid reading past EOF.
         const end = match[2] ? parseInt(match[2], 10) : fileSize - 1
         const chunkSize = end - start + 1
 
         if (start >= fileSize || end >= fileSize || start > end) {
-          // Range Not Satisfiable
           return new Response('Range Not Satisfiable', {
             status: 416,
             headers: { 'Content-Range': `bytes */${fileSize}` }
           })
         }
 
-        // Create a ReadStream for exactly the requested byte range
-        const stream = createReadStream(filePath, { start, end })
-
-        // Convert Node.js ReadStream → Web ReadableStream (what Response expects)
-        const webStream = nodeStreamToWebStream(stream)
-
-        return new Response(webStream, {
-          status: 206, // Partial Content
+        return new Response(nodeStreamToWebStream(createReadStream(filePath, { start, end })), {
+          status: 206,
           headers: {
             'Content-Type': mimeType,
             'Content-Length': String(chunkSize),
@@ -143,34 +222,23 @@ app.whenReady().then(() => {
         })
       }
 
-      // ── No Range header: serve full file ────────────────────────────
-      // This happens on the very first load or when the browser
-      // wants the complete file (e.g. for duration detection).
-      const stream = createReadStream(filePath)
-      const webStream = nodeStreamToWebStream(stream)
-
-      return new Response(webStream, {
+      return new Response(nodeStreamToWebStream(createReadStream(filePath)), {
         status: 200,
         headers: {
           'Content-Type': mimeType,
           'Content-Length': String(fileSize),
-          'Accept-Ranges': 'bytes' // tells the browser seeking is supported
+          'Accept-Ranges': 'bytes'
         }
       })
     } catch (err) {
-      console.error('[localvideo protocol] Unhandled error:', err)
+      console.error('[localvideo protocol] error:', err)
       return new Response('Internal Error', { status: 500 })
     }
   })
 
   electronApp.setAppUserModelId('com.vidvault')
-
-  app.on('browser-window-created', (_, window) => {
-    optimizer.watchWindowShortcuts(window)
-  })
-
+  app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
   createWindow()
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -179,28 +247,6 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
-
-// ─── Helper: Node.js ReadStream → Web ReadableStream ─────────────────────
-// The Fetch API / Response constructor expects a Web ReadableStream,
-// but fs.createReadStream() returns a Node.js stream. This bridges them.
-function nodeStreamToWebStream(nodeStream) {
-  return new ReadableStream({
-    start(controller) {
-      nodeStream.on('data', (chunk) => {
-        controller.enqueue(chunk)
-      })
-      nodeStream.on('end', () => {
-        controller.close()
-      })
-      nodeStream.on('error', (err) => {
-        controller.error(err)
-      })
-    },
-    cancel() {
-      nodeStream.destroy()
-    }
-  })
-}
 
 // ─── IPC: Open folder dialog ───────────────────────────────────────────────
 ipcMain.handle('dialog:openFolder', async () => {
@@ -212,11 +258,20 @@ ipcMain.handle('dialog:openFolder', async () => {
   return result.filePaths[0]
 })
 
-// ─── IPC: Read all videos from a directory ────────────────────────────────
-ipcMain.handle('fs:readVideos', (_event, dirPath) => {
+// ─── IPC: Read videos + extract dimensions via ffprobe ────────────────────
+ipcMain.handle('fs:readVideos', async (_event, dirPath) => {
   if (!dirPath) return []
 
-  const videos = []
+  // Check if directory exists before doing anything
+  try {
+    const stat = statSync(dirPath)
+    if (!stat.isDirectory()) return { error: 'not_found' }
+  } catch {
+    return { error: 'not_found' }
+  }
+
+  // 1. Scan directory
+  const rawVideos = []
 
   const walk = (currentPath) => {
     let entries
@@ -228,12 +283,10 @@ ipcMain.handle('fs:readVideos', (_event, dirPath) => {
 
     for (const entry of entries) {
       const fullPath = join(currentPath, entry.name)
-
       if (entry.isDirectory()) {
         if (!entry.name.startsWith('.')) walk(fullPath)
         continue
       }
-
       const dotIndex = entry.name.lastIndexOf('.')
       if (dotIndex === -1) continue
       const ext = entry.name.slice(dotIndex).toLowerCase()
@@ -246,14 +299,13 @@ ipcMain.handle('fs:readVideos', (_event, dirPath) => {
         continue
       }
 
-      const videoUrl = `localvideo://local/${encodeURIComponent(fullPath)}`
-
-      videos.push({
+      rawVideos.push({
         id: Buffer.from(fullPath).toString('base64').replace(/[+/=]/g, '_'),
         fileName: entry.name,
         filePath: fullPath,
-        videoUrl,
+        videoUrl: `localvideo://local/${encodeURIComponent(fullPath)}`,
         size: stat.size,
+        mtime: stat.mtimeMs,
         createdAt: stat.birthtimeMs || stat.ctimeMs,
         modifiedAt: stat.mtimeMs,
         ext: ext.slice(1).toUpperCase()
@@ -262,6 +314,55 @@ ipcMain.handle('fs:readVideos', (_event, dirPath) => {
   }
 
   walk(dirPath)
-  videos.sort((a, b) => b.modifiedAt - a.modifiedAt)
-  return videos
+  rawVideos.sort((a, b) => b.modifiedAt - a.modifiedAt)
+
+  // 2. Load dimension cache
+  const cache = loadCache()
+  let cacheChanged = false
+
+  // 3. Determine which videos need ffprobe (not in cache or mtime changed)
+  const needProbe = rawVideos.filter((v) => {
+    const cached = cache[v.filePath]
+    return !cached || cached.mtime !== v.mtime
+  })
+
+  // 4. Run ffprobe with concurrency limit of 8
+  if (needProbe.length > 0) {
+    const tasks = needProbe.map((v) => async () => {
+      const dims = await getVideoDimensions(v.filePath)
+      if (dims) {
+        cache[v.filePath] = { ...dims, mtime: v.mtime }
+        cacheChanged = true
+      }
+    })
+    await runWithConcurrency(tasks, 8)
+  }
+
+  // 5. Save updated cache
+  if (cacheChanged) saveCache(cache)
+
+  // 6. Attach dimensions to each video
+  return rawVideos.map((v) => {
+    const dims = cache[v.filePath]
+    return {
+      ...v,
+      width: dims?.width || null,
+      height: dims?.height || null,
+      duration: dims?.duration || null
+    }
+  })
 })
+
+// ─── Helper: Node stream → Web ReadableStream ──────────────────────────────
+function nodeStreamToWebStream(nodeStream) {
+  return new ReadableStream({
+    start(controller) {
+      nodeStream.on('data', (chunk) => controller.enqueue(chunk))
+      nodeStream.on('end', () => controller.close())
+      nodeStream.on('error', (err) => controller.error(err))
+    },
+    cancel() {
+      nodeStream.destroy()
+    }
+  })
+}

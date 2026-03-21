@@ -1,29 +1,82 @@
 <script setup>
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useVideoLibrary } from '../composables/useVideoLibrary.js'
 
-const props = defineProps({
-  isDark: Boolean
-})
+const props = defineProps({ isDark: Boolean })
 const emit = defineEmits(['toggle-theme'])
 
-const { folderName, openFolderDialog, isLoading, videos } = useVideoLibrary()
+const {
+  folderName,
+  currentFolder,
+  folderHistory,
+  isLoading,
+  videos,
+  openFolderDialog,
+  loadFolder,
+  closeFolder,
+  deleteFromHistory
+} = useVideoLibrary()
+
+// ─── History dropdown ──────────────────────────────────────────────────────
+const showHistory = ref(false)
+
+const toggleHistory = () => {
+  if (folderHistory.value.length === 0) {
+    // No history yet — just open dialog directly
+    openFolderDialog()
+    return
+  }
+  showHistory.value = !showHistory.value
+}
+
+const selectFolder = async (path) => {
+  showHistory.value = false
+  await loadFolder(path)
+}
+
+const removeFolder = (e, path) => {
+  e.stopPropagation()
+  deleteFromHistory(path)
+}
+
+// Close dropdown on outside click
+const handleOutsideClick = (e) => {
+  if (!e.target.closest('.folder-control')) {
+    showHistory.value = false
+  }
+}
+
+onMounted(() => document.addEventListener('mousedown', handleOutsideClick))
+onUnmounted(() => document.removeEventListener('mousedown', handleOutsideClick))
+
+// ─── Relative time ─────────────────────────────────────────────────────────
+function relativeTime(ts) {
+  const diff = Date.now() - ts
+  const m = Math.floor(diff / 60000)
+  const h = Math.floor(diff / 3600000)
+  const d = Math.floor(diff / 86400000)
+  if (m < 1) return 'ahora'
+  if (m < 60) return `hace ${m}m`
+  if (h < 24) return `hace ${h}h`
+  return `hace ${d}d`
+}
 </script>
 
 <template>
   <header class="titlebar">
-    <!-- macOS traffic light spacer -->
     <div class="traffic-lights-spacer" />
 
-    <!-- App name -->
+    <!-- Brand -->
     <div class="titlebar-brand">
       <span class="brand-icon">▣</span>
       <span class="brand-name">VidVault</span>
     </div>
 
-    <!-- Center: current folder info -->
+    <!-- Center: folder pill with history dropdown -->
     <div class="titlebar-center">
-      <Transition name="fade">
-        <div v-if="folderName" class="folder-pill">
+      <div class="folder-control" v-if="currentFolder">
+        <!-- Current folder pill -->
+        <button class="folder-pill" @click="toggleHistory" :title="currentFolder">
           <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
             <path
               d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
@@ -31,13 +84,111 @@ const { folderName, openFolderDialog, isLoading, videos } = useVideoLibrary()
           </svg>
           <span class="folder-name">{{ folderName }}</span>
           <span v-if="videos.length > 0" class="video-count">{{ videos.length }}</span>
-        </div>
-      </Transition>
+          <svg
+            class="chevron"
+            :class="{ open: showHistory }"
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+
+        <!-- Close current folder -->
+        <button class="close-folder-btn" @click="closeFolder" title="Cerrar carpeta">
+          <svg
+            width="11"
+            height="11"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+          >
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+
+        <!-- History dropdown -->
+        <Transition name="dropdown">
+          <div v-if="showHistory" class="history-dropdown">
+            <div class="dropdown-header">Recientes</div>
+
+            <button
+              v-for="entry in folderHistory"
+              :key="entry.path"
+              class="history-item"
+              :class="{ active: entry.path === currentFolder }"
+              @click="selectFolder(entry.path)"
+            >
+              <div class="history-item-left">
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 16 16"
+                  fill="currentColor"
+                  class="history-icon"
+                >
+                  <path
+                    d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
+                  />
+                </svg>
+                <div class="history-item-info">
+                  <span class="history-name">{{ entry.name }}</span>
+                  <span class="history-path">{{ entry.path }}</span>
+                </div>
+              </div>
+              <div class="history-item-right">
+                <span class="history-time">{{ relativeTime(entry.lastOpened) }}</span>
+                <button
+                  class="history-remove"
+                  @click="removeFolder($event, entry.path)"
+                  title="Eliminar del historial"
+                >
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2.5"
+                  >
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            </button>
+
+            <div class="dropdown-divider" />
+
+            <button
+              class="history-open-new"
+              @click="
+                () => {
+                  showHistory = false
+                  openFolderDialog()
+                }
+              "
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                <path
+                  d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
+                />
+              </svg>
+              Abrir otra carpeta…
+            </button>
+          </div>
+        </Transition>
+      </div>
     </div>
 
     <!-- Right controls -->
     <div class="titlebar-controls">
-      <!-- Open folder -->
       <button
         class="ctrl-btn open-btn"
         @click="openFolderDialog"
@@ -64,13 +215,11 @@ const { folderName, openFolderDialog, isLoading, videos } = useVideoLibrary()
         <span>{{ isLoading ? 'Cargando…' : 'Abrir carpeta' }}</span>
       </button>
 
-      <!-- Theme toggle -->
       <button
         class="ctrl-btn icon-btn"
         @click="$emit('toggle-theme')"
         :title="isDark ? 'Modo claro' : 'Modo oscuro'"
       >
-        <!-- Sun -->
         <svg
           v-if="isDark"
           width="14"
@@ -90,7 +239,6 @@ const { folderName, openFolderDialog, isLoading, videos } = useVideoLibrary()
           <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
           <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
         </svg>
-        <!-- Moon -->
         <svg
           v-else
           width="14"
@@ -116,13 +264,12 @@ const { folderName, openFolderDialog, isLoading, videos } = useVideoLibrary()
   padding: 0 16px 0 0;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-subtle);
-  -webkit-app-region: drag; /* makes the titlebar draggable in Electron */
+  -webkit-app-region: drag;
   flex-shrink: 0;
   position: relative;
-  z-index: 100;
+  z-index: 200;
 }
 
-/* All interactive children must opt out of drag */
 button,
 a,
 input {
@@ -130,7 +277,7 @@ input {
 }
 
 .traffic-lights-spacer {
-  width: 72px; /* macOS traffic lights: ~68px */
+  width: 72px;
   flex-shrink: 0;
 }
 
@@ -140,13 +287,11 @@ input {
   gap: 7px;
   flex-shrink: 0;
 }
-
 .brand-icon {
   font-size: 15px;
   color: var(--accent);
   line-height: 1;
 }
-
 .brand-name {
   font-family: var(--font-display);
   font-size: 13px;
@@ -155,25 +300,44 @@ input {
   color: var(--text-primary);
 }
 
+/* ─── Center folder control ───────────────────────────────────────────────── */
 .titlebar-center {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
+}
+
+.folder-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  position: relative;
+  -webkit-app-region: no-drag;
 }
 
 .folder-pill {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px 3px 8px;
+  padding: 3px 8px 3px 8px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: 20px;
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: 11px;
-  max-width: 320px;
+  cursor: pointer;
+  max-width: 280px;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.folder-pill:hover {
+  background: var(--bg-app);
+  border-color: var(--border-medium);
 }
 
 .folder-name {
@@ -194,6 +358,194 @@ input {
   flex-shrink: 0;
 }
 
+.chevron {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+.chevron.open {
+  transform: rotate(180deg);
+}
+
+.close-folder-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  transition:
+    background 0.15s,
+    color 0.15s,
+    border-color 0.15s;
+  flex-shrink: 0;
+}
+
+.close-folder-btn:hover {
+  background: rgba(220, 50, 40, 0.12);
+  border-color: rgba(220, 50, 40, 0.3);
+  color: #dc3228;
+}
+
+/* ─── History dropdown ────────────────────────────────────────────────────── */
+.history-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 360px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  overflow: hidden;
+  z-index: 999;
+}
+
+.dropdown-header {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  padding: 10px 14px 6px;
+  text-transform: uppercase;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 14px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 0.12s;
+  gap: 8px;
+  text-align: left;
+}
+
+.history-item:hover {
+  background: var(--bg-app);
+}
+
+.history-item.active {
+  background: var(--accent-subtle);
+}
+
+.history-item-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.history-icon {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.history-item.active .history-icon {
+  color: var(--accent);
+}
+
+.history-item-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.history-name {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-path {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-item-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.history-time {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.history-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  opacity: 0;
+  transition:
+    opacity 0.15s,
+    background 0.15s,
+    color 0.15s;
+}
+
+.history-item:hover .history-remove {
+  opacity: 1;
+}
+.history-remove:hover {
+  background: rgba(220, 50, 40, 0.12);
+  color: #dc3228;
+}
+
+.dropdown-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 4px 0;
+}
+
+.history-open-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  transition: background 0.12s;
+}
+
+.history-open-new:hover {
+  background: var(--accent-subtle);
+}
+
+/* ─── Right controls ──────────────────────────────────────────────────────── */
 .titlebar-controls {
   display: flex;
   align-items: center;
@@ -220,16 +572,13 @@ input {
     border-color 0.15s,
     transform 0.1s;
 }
-
 .ctrl-btn:hover:not(:disabled) {
   background: var(--bg-app);
   border-color: var(--border-strong);
 }
-
 .ctrl-btn:active:not(:disabled) {
   transform: scale(0.97);
 }
-
 .ctrl-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -240,7 +589,6 @@ input {
   border-color: var(--accent);
   background: var(--accent-subtle);
 }
-
 .open-btn:hover:not(:disabled) {
   background: var(--accent);
   color: var(--text-on-accent);
@@ -251,7 +599,6 @@ input {
   padding: 6px 8px;
   color: var(--text-secondary);
 }
-
 .icon-btn:hover {
   color: var(--text-primary);
 }
@@ -259,20 +606,29 @@ input {
 .spin {
   animation: spin 0.9s linear infinite;
 }
-
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
 
-/* Transition */
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s;
+/* Dropdown transition */
+.dropdown-enter-active {
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
 }
-.fade-enter-from,
-.fade-leave-to {
+.dropdown-leave-active {
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+}
+.dropdown-enter-from {
   opacity: 0;
+  transform: translateX(-50%) translateY(-6px);
+}
+.dropdown-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-4px);
 }
 </style>
