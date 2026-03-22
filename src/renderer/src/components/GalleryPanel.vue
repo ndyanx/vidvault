@@ -7,21 +7,21 @@ import VideoModal from './VideoModal.vue'
 const { videos, isLoading } = useVideoLibrary()
 
 // ─── Constants ────────────────────────────────────────────────────────────
-const GAP = 10 // px gap between cards
-const VIEWPORT_MARGIN = 600 // px above/below viewport to keep rendered
-const DEFAULT_RATIO = 9 / 16 // fallback aspect ratio (portrait)
+const GAP = 10
+const VIEWPORT_MARGIN = 400
+const DEFAULT_RATIO = 9 / 16
 
 // ─── Refs ──────────────────────────────────────────────────────────────────
 const rootRef = ref(null)
 const colCount = ref(4)
-const colWidth = ref(200) // computed from container width
+const colWidth = ref(200)
 const scrollTop = ref(0)
-const containerHeight = ref(0) // total scrollable height
+const containerHeight = ref(0)
 
-// ─── Layout: precalculated positions ──────────────────────────────────────
-// layoutItems[i] = { video, x, y, width, height, colIndex }
-// Computed once per (videos, colCount, colWidth) change.
-// x/y are absolute pixel positions within the scroll container.
+// ─── Layout ────────────────────────────────────────────────────────────────
+// layoutItems[i] = { id, video, x, y, width, height }
+// Keeping video ref here is fine — it's a single shared reactive object,
+// not duplicated data (no large buffers, just metadata).
 const layoutItems = ref([])
 
 function buildLayout(vids, cols, cw) {
@@ -31,27 +31,23 @@ function buildLayout(vids, cols, cw) {
     return
   }
 
-  // Track the current bottom Y of each column
   const colHeights = new Array(cols).fill(0)
   const items = []
 
   for (let i = 0; i < vids.length; i++) {
     const video = vids[i]
 
-    // Pick the shortest column to place this card
     let minCol = 0
     for (let c = 1; c < cols; c++) {
       if (colHeights[c] < colHeights[minCol]) minCol = c
     }
 
-    // Card dimensions
     const ratio = video.width && video.height ? video.width / video.height : DEFAULT_RATIO
     const cardHeight = Math.round(cw / ratio)
     const x = minCol * (cw + GAP)
     const y = colHeights[minCol]
 
-    items.push({ video, x, y, width: cw, height: cardHeight, colIndex: minCol })
-
+    items.push({ id: video.id, video, x, y, width: cw, height: cardHeight })
     colHeights[minCol] += cardHeight + GAP
   }
 
@@ -59,8 +55,7 @@ function buildLayout(vids, cols, cw) {
   containerHeight.value = Math.max(...colHeights)
 }
 
-// ─── Visible items (virtualization) ───────────────────────────────────────
-// Only items whose Y range intersects (scrollTop - margin) to (scrollTop + viewportH + margin)
+// ─── Virtualization ────────────────────────────────────────────────────────
 const viewportHeight = ref(800)
 
 const visibleItems = computed(() => {
@@ -72,12 +67,12 @@ const visibleItems = computed(() => {
   })
 })
 
-// ─── Scroll handler ────────────────────────────────────────────────────────
+// ─── Scroll ────────────────────────────────────────────────────────────────
 const handleScroll = (e) => {
   scrollTop.value = e.target.scrollTop
 }
 
-// ─── Responsive columns via ResizeObserver ─────────────────────────────────
+// ─── Responsive columns ────────────────────────────────────────────────────
 const getColsForWidth = (w) => {
   if (w < 480) return 1
   if (w < 720) return 2
@@ -88,7 +83,7 @@ const getColsForWidth = (w) => {
 
 const updateLayout = () => {
   if (!rootRef.value) return
-  const w = rootRef.value.clientWidth - 32 // subtract padding
+  const w = rootRef.value.clientWidth - 32
   viewportHeight.value = rootRef.value.clientHeight
   const cols = getColsForWidth(w)
   const cw = Math.floor((w - (cols - 1) * GAP) / cols)
@@ -98,126 +93,30 @@ const updateLayout = () => {
 }
 
 let resizeObserver = null
-const initResizeObserver = () => {
-  resizeObserver = new ResizeObserver(() => updateLayout())
-  if (rootRef.value) resizeObserver.observe(rootRef.value)
-}
 
-// ─── Rebuild layout when videos change ────────────────────────────────────
-watch(
-  videos,
-  () => {
-    nextTick(() => updateLayout())
-  },
-  { flush: 'post' }
-)
-
-// ─── Video playback (IntersectionObserver on rendered cards) ──────────────
-// Only the ~40-50 rendered cards get observed at any time.
-const videoEls = {}
-const playTimers = {}
-const PLAY_DELAY = 1500
-const visibleMap = ref({})
-
-const schedulePlay = (id) => {
-  if (playTimers[id]) return
-  playTimers[id] = setTimeout(() => {
-    delete playTimers[id]
-    if (!modalVideo.value) videoEls[id]?.play().catch(() => {})
-  }, PLAY_DELAY)
-}
-
-const cancelPlay = (id) => {
-  if (playTimers[id]) {
-    clearTimeout(playTimers[id])
-    delete playTimers[id]
-  }
-}
-
-let intersectionObserver = null
-
-const initIntersectionObserver = () => {
-  intersectionObserver = new IntersectionObserver(
-    (entries) => {
-      const next = { ...visibleMap.value }
-      let changed = false
-      entries.forEach((entry) => {
-        const id = entry.target.dataset.videoid
-        if (!id) return
-        if (entry.isIntersecting) {
-          if (!next[id]) {
-            next[id] = true
-            changed = true
-          }
-          schedulePlay(id)
-        } else {
-          if (next[id]) {
-            delete next[id]
-            changed = true
-          }
-          cancelPlay(id)
-          videoEls[id]?.pause()
-        }
-      })
-      if (changed) visibleMap.value = next
-    },
-    { rootMargin: '200px 0px 200px 0px', threshold: 0 }
-  )
-}
-
-// Card ref callback — observe with IntersectionObserver
-const cardRefs = {}
-const setCardRef = (el, id) => {
-  if (el && !cardRefs[id]) {
-    cardRefs[id] = el
-    intersectionObserver?.observe(el)
-  } else if (!el && cardRefs[id]) {
-    intersectionObserver?.unobserve(cardRefs[id])
-    delete cardRefs[id]
-    // Clean up video and timers when card is virtualized away
-    cancelPlay(id)
-    videoEls[id]?.pause()
-    delete videoEls[id]
-    const next = { ...visibleMap.value }
-    delete next[id]
-    visibleMap.value = next
-  }
-}
-
-const setVideoRef = (el, id) => {
-  if (el) videoEls[id] = el
-  else delete videoEls[id]
-}
+// ─── Rebuild layout when videos change (e.g. thumbnails updating dimensions)
+watch(videos, () => nextTick(() => updateLayout()), { flush: 'post', deep: false })
 
 // ─── Modal ─────────────────────────────────────────────────────────────────
 const modalVideo = ref(null)
 
 const openModal = (video) => {
-  Object.values(videoEls).forEach((el) => el?.pause())
-  Object.keys(playTimers).forEach((id) => cancelPlay(id))
   modalVideo.value = video
 }
 
 const closeModal = () => {
   modalVideo.value = null
-  nextTick(() => {
-    Object.entries(visibleMap.value).forEach(([id, visible]) => {
-      if (visible) schedulePlay(id)
-    })
-  })
 }
 
 // ─── Lifecycle ─────────────────────────────────────────────────────────────
 onMounted(() => {
-  initResizeObserver()
-  initIntersectionObserver()
+  resizeObserver = new ResizeObserver(() => updateLayout())
+  if (rootRef.value) resizeObserver.observe(rootRef.value)
   updateLayout()
 })
 
 onUnmounted(() => {
   resizeObserver?.disconnect()
-  intersectionObserver?.disconnect()
-  Object.keys(playTimers).forEach((id) => cancelPlay(id))
 })
 </script>
 
@@ -226,19 +125,16 @@ onUnmounted(() => {
     <!-- Skeleton while loading -->
     <VideoSkeleton v-if="isLoading" :count="16" :cols="colCount" />
 
-    <!-- Virtual canvas: fixed height = total layout height + footer -->
+    <!-- Virtual canvas -->
     <div
       v-else-if="layoutItems.length"
       class="gallery-canvas"
       :style="{ height: containerHeight + 56 + 'px' }"
     >
-      <!-- Only render visible items -->
       <div
         v-for="item in visibleItems"
-        :key="item.video.id"
+        :key="item.id"
         class="gallery-card"
-        :data-videoid="item.video.id"
-        :ref="(el) => setCardRef(el, item.video.id)"
         :style="{
           position: 'absolute',
           left: item.x + 'px',
@@ -248,20 +144,20 @@ onUnmounted(() => {
         }"
         @click="openModal(item.video)"
       >
-        <!-- Video element -->
-        <video
-          v-if="visibleMap[item.video.id]"
-          :ref="(el) => setVideoRef(el, item.video.id)"
-          :src="item.video.videoUrl"
-          muted
-          loop
-          playsinline
-          preload="metadata"
-          class="card-video"
-        />
-
-        <!-- Placeholder when card is rendered but not yet intersecting -->
-        <div v-else class="card-placeholder" />
+        <!-- Thumbnail image — shows skeleton shimmer until thumbnailUrl arrives -->
+        <Transition name="thumb-fade">
+          <img
+            v-if="item.video.thumbnailUrl"
+            :key="item.video.thumbnailUrl"
+            :src="item.video.thumbnailUrl"
+            class="card-thumb"
+            draggable="false"
+            loading="lazy"
+          />
+          <div v-else class="card-thumb-placeholder">
+            <div class="thumb-shimmer" />
+          </div>
+        </Transition>
 
         <!-- Hover overlay -->
         <div class="card-overlay">
@@ -272,7 +168,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- Play icon -->
+        <!-- Play icon (always visible on hover) -->
         <div class="card-play-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
             <polygon points="5 3 19 12 5 21 5 3" />
@@ -280,7 +176,7 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Footer inside canvas, absolutely positioned below last card -->
+      <!-- Footer -->
       <div
         class="gallery-footer"
         :class="{ 'modal-open': !!modalVideo }"
@@ -291,7 +187,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Empty (folder loaded but no videos found) -->
+    <!-- Empty -->
     <div v-else-if="!isLoading" class="gallery-empty">
       <p>No se encontraron videos en esta carpeta.</p>
     </div>
@@ -310,13 +206,12 @@ onUnmounted(() => {
   scroll-behavior: smooth;
 }
 
-/* The canvas fills the total layout height so the scrollbar is correct */
 .gallery-canvas {
   position: relative;
   width: 100%;
 }
 
-/* ─── Card ────────────────────────────────────────────────────────────────── */
+/* ─── Card ─────────────────────────────────────────────────────────────── */
 .gallery-card {
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -340,27 +235,73 @@ onUnmounted(() => {
 .gallery-card:hover .card-overlay {
   opacity: 1;
 }
+
 .gallery-card:hover .card-play-icon {
   opacity: 1;
   transform: translate(-50%, -50%) scale(1);
 }
 
-/* ─── Video & placeholder ─────────────────────────────────────────────────── */
-.card-video,
-.card-placeholder {
+/* ─── Thumbnail ─────────────────────────────────────────────────────────── */
+.card-thumb,
+.card-thumb-placeholder {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
   display: block;
 }
 
-.card-placeholder {
-  background: var(--bg-elevated);
+.card-thumb {
+  object-fit: cover;
 }
 
-/* ─── Overlay ─────────────────────────────────────────────────────────────── */
+.card-thumb-placeholder {
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+/* Shimmer inside placeholder while thumbnail loads */
+.thumb-shimmer {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 40%,
+    rgba(255, 255, 255, 0.06) 50%,
+    transparent 60%
+  );
+  background-size: 200% 100%;
+  animation: shimmer-slide 1.8s ease-in-out infinite;
+}
+
+[data-theme='light'] .thumb-shimmer {
+  background: linear-gradient(
+    105deg,
+    transparent 40%,
+    rgba(255, 255, 255, 0.55) 50%,
+    transparent 60%
+  );
+  background-size: 200% 100%;
+}
+
+@keyframes shimmer-slide {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* Smooth thumbnail appearance */
+.thumb-fade-enter-active {
+  transition: opacity 0.3s ease;
+}
+.thumb-fade-enter-from {
+  opacity: 0;
+}
+
+/* ─── Overlay ─────────────────────────────────────────────────────────── */
 .card-overlay {
   position: absolute;
   bottom: 0;
@@ -407,7 +348,7 @@ onUnmounted(() => {
   color: rgba(255, 255, 255, 0.5);
 }
 
-/* ─── Play icon ───────────────────────────────────────────────────────────── */
+/* ─── Play icon ─────────────────────────────────────────────────────────── */
 .card-play-icon {
   position: absolute;
   top: 50%;
@@ -431,7 +372,7 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-/* ─── Footer ──────────────────────────────────────────────────────────────── */
+/* ─── Footer ─────────────────────────────────────────────────────────────── */
 .gallery-footer {
   position: absolute;
   left: 0;
@@ -449,7 +390,7 @@ onUnmounted(() => {
   opacity: 0;
 }
 
-/* ─── Empty ───────────────────────────────────────────────────────────────── */
+/* ─── Empty ──────────────────────────────────────────────────────────────── */
 .gallery-empty {
   height: 100%;
   display: flex;

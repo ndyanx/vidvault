@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref, computed, onUnmounted } from 'vue'
 
 const STORAGE_KEY = 'vidvault-last-folder'
 const HISTORY_KEY = 'vidvault-folder-history'
@@ -25,14 +25,12 @@ function saveHistory(history) {
 
 function pushToHistory(folderPath) {
   let history = loadHistory()
-  // Remove if already exists (will re-add at top)
   history = history.filter((h) => h.path !== folderPath)
   history.unshift({
     path: folderPath,
     name: folderPath.replace(/\\/g, '/').split('/').filter(Boolean).pop(),
     lastOpened: Date.now()
   })
-  // Keep only last MAX_HISTORY entries
   history = history.slice(0, MAX_HISTORY)
   saveHistory(history)
   return history
@@ -56,6 +54,22 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
+// ─── Thumbnail IPC listener (singleton) ───────────────────────────────────
+// Subscribes once and patches videos as thumbnails arrive from main process.
+let unsubscribeThumbnail = null
+
+function ensureThumbnailListener() {
+  if (unsubscribeThumbnail || !isElectron) return
+
+  unsubscribeThumbnail = window.electronAPI.onThumbnailReady(({ id, thumbnailUrl }) => {
+    const video = videos.value.find((v) => v.id === id)
+    if (video) {
+      video.thumbnailUrl = thumbnailUrl
+    }
+  })
+}
+
+// ─── Composable ───────────────────────────────────────────────────────────
 export function useVideoLibrary() {
   const isEmpty = computed(() => videos.value.length === 0)
 
@@ -74,24 +88,24 @@ export function useVideoLibrary() {
     videos.value = []
     currentFolder.value = folderPath
 
+    // Ensure thumbnail push listener is active before the call
+    ensureThumbnailListener()
+
     try {
       const result = await window.electronAPI.readVideos(folderPath)
 
-      // Main process returns { error } if folder doesn't exist
       if (result?.error === 'not_found') {
         error.value = { type: 'not_found', folder: folderPath }
         currentFolder.value = null
         localStorage.removeItem(STORAGE_KEY)
-        // Remove from history automatically
         folderHistory.value = removeFromHistory(folderPath)
         return
       }
 
       videos.value = result.map((v) => ({
         ...v,
-        sizeFormatted: formatSize(v.size),
-        width: v.width || null,
-        height: v.height || null
+        sizeFormatted: formatSize(v.size)
+        // thumbnailUrl is already set for cached videos, null for new ones
       }))
 
       localStorage.setItem(STORAGE_KEY, folderPath)
@@ -123,16 +137,15 @@ export function useVideoLibrary() {
   // ── Remove entry from history ─────────────────────────────────────────
   function deleteFromHistory(folderPath) {
     folderHistory.value = removeFromHistory(folderPath)
-    // If it's the current folder, also close it
     if (currentFolder.value === folderPath) closeFolder()
   }
 
-  // ── Dismiss error (e.g. user acknowledges folder is gone) ─────────────
+  // ── Dismiss error ─────────────────────────────────────────────────────
   function dismissError() {
     error.value = null
   }
 
-  // ── Update video dimensions (from GalleryPanel metadata) ──────────────
+  // ── Update video dimensions (fallback from renderer if needed) ─────────
   function updateVideoDimensions(id, width, height) {
     const video = videos.value.find((v) => v.id === id)
     if (video) {

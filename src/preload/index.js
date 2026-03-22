@@ -14,8 +14,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /**
    * Reads all video files from a directory recursively.
+   * Returns immediately with cached thumbnails; missing ones arrive via onThumbnailReady.
    * @param {string} dirPath
    * @returns {Promise<Array>}
    */
-  readVideos: (dirPath) => ipcRenderer.invoke('fs:readVideos', dirPath)
+  readVideos: (dirPath) => ipcRenderer.invoke('fs:readVideos', dirPath),
+
+  /**
+   * Subscribe to background thumbnail generation events.
+   * Callback receives { id, thumbnailUrl } for each completed thumbnail.
+   * @param {Function} callback
+   * @returns {Function} unsubscribe — call to remove the listener
+   */
+  onThumbnailReady: (callback) => {
+    const handler = (_event, data) => callback(data)
+    ipcRenderer.on('thumbnail:ready', handler)
+    return () => ipcRenderer.off('thumbnail:ready', handler)
+  }
 })

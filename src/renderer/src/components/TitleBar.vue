@@ -22,7 +22,6 @@ const showHistory = ref(false)
 
 const toggleHistory = () => {
   if (folderHistory.value.length === 0) {
-    // No history yet — just open dialog directly
     openFolderDialog()
     return
   }
@@ -39,7 +38,6 @@ const removeFolder = (e, path) => {
   deleteFromHistory(path)
 }
 
-// Close dropdown on outside click
 const handleOutsideClick = (e) => {
   if (!e.target.closest('.folder-control')) {
     showHistory.value = false
@@ -75,7 +73,6 @@ function relativeTime(ts) {
     <!-- Center: folder pill with history dropdown -->
     <div class="titlebar-center">
       <div class="folder-control" v-if="currentFolder">
-        <!-- Current folder pill -->
         <button class="folder-pill" @click="toggleHistory" :title="currentFolder">
           <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
             <path
@@ -98,7 +95,6 @@ function relativeTime(ts) {
           </svg>
         </button>
 
-        <!-- Close current folder -->
         <button class="close-folder-btn" @click="closeFolder" title="Cerrar carpeta">
           <svg
             width="11"
@@ -215,6 +211,7 @@ function relativeTime(ts) {
         <span>{{ isLoading ? 'Cargando…' : 'Abrir carpeta' }}</span>
       </button>
 
+      <!-- Theme toggle -->
       <button
         class="ctrl-btn icon-btn"
         @click="$emit('toggle-theme')"
@@ -300,7 +297,7 @@ input {
   color: var(--text-primary);
 }
 
-/* ─── Center folder control ───────────────────────────────────────────────── */
+/* ─── Center ──────────────────────────────────────────────────────────────── */
 .titlebar-center {
   flex: 1;
   display: flex;
@@ -321,7 +318,7 @@ input {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 8px 3px 8px;
+  padding: 3px 8px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: 20px;
@@ -334,7 +331,6 @@ input {
     background 0.15s,
     border-color 0.15s;
 }
-
 .folder-pill:hover {
   background: var(--bg-app);
   border-color: var(--border-medium);
@@ -384,7 +380,6 @@ input {
     border-color 0.15s;
   flex-shrink: 0;
 }
-
 .close-folder-btn:hover {
   background: rgba(220, 50, 40, 0.12);
   border-color: rgba(220, 50, 40, 0.3);
@@ -428,11 +423,9 @@ input {
   gap: 8px;
   text-align: left;
 }
-
 .history-item:hover {
   background: var(--bg-app);
 }
-
 .history-item.active {
   background: var(--accent-subtle);
 }
@@ -510,7 +503,6 @@ input {
     background 0.15s,
     color 0.15s;
 }
-
 .history-item:hover .history-remove {
   opacity: 1;
 }
@@ -540,7 +532,6 @@ input {
   color: var(--accent);
   transition: background 0.12s;
 }
-
 .history-open-new:hover {
   background: var(--accent-subtle);
 }
