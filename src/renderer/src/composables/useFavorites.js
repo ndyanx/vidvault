@@ -5,11 +5,10 @@ const store = isElectron ? window.electronAPI.store : null
 
 // Singleton reactive set — initialized async in init(), used sync everywhere else
 const favSet = ref(new Set())
-let initialized = false
+let initPromise = null
 
 async function ensureInit() {
-  if (initialized || !isElectron) return
-  initialized = true
+  if (!isElectron) return
   try {
     const ids = await store.get('favorites')
     favSet.value = new Set(Array.isArray(ids) ? ids : [])
@@ -20,7 +19,8 @@ async function ensureInit() {
 
 // Call once at app startup (from useVideoLibrary.init or App.vue onMounted)
 export async function initFavorites() {
-  await ensureInit()
+  if (!initPromise) initPromise = ensureInit()
+  return initPromise
 }
 
 export function useFavorites() {

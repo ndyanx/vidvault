@@ -2,6 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useVideoLibrary } from '../composables/useVideoLibrary.js'
 import { useFavorites } from '../composables/useFavorites.js'
+import { formatDuration } from '../utils/format.js'
 import VideoSkeleton from './VideoSkeleton.vue'
 import VideoModal from './VideoModal.vue'
 
@@ -155,17 +156,6 @@ const ctxOpenModal = () => {
 
 const handleGlobalMousedown = (e) => {
   if (ctxRef.value && !ctxRef.value.contains(e.target)) closeContextMenu()
-}
-
-// ─── Duration formatting ───────────────────────────────────────────────────
-function formatDuration(seconds) {
-  if (!seconds) return null
-  const s = Math.round(seconds)
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-  return `${m}:${String(sec).padStart(2, '0')}`
 }
 
 // ─── Modal + keyboard nav ──────────────────────────────────────────────────
@@ -390,7 +380,6 @@ onUnmounted(() => {
       >
         {{ filteredVideos.length }} video{{ filteredVideos.length !== 1 ? 's' : '' }}
         <template v-if="filteredVideos.length !== videos.length"> de {{ videos.length }}</template>
-        · {{ visibleItems.length }} en pantalla
       </div>
     </div>
 

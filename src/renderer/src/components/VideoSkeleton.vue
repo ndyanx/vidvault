@@ -3,6 +3,10 @@ defineProps({
   count: { type: Number, default: 12 },
   cols: { type: Number, default: 4 }
 })
+
+// Varied aspect ratios so skeleton feels like real masonry
+const ASPECTS = ['9/16', '4/3', '16/9', '1/1', '9/16', '3/4', '16/9', '4/3']
+const getAspect = (col, row) => ASPECTS[(col * 2 + row) % ASPECTS.length]
 </script>
 
 <template>
@@ -22,18 +26,6 @@ defineProps({
     </div>
   </div>
 </template>
-
-<script>
-// Varied aspect ratios so skeleton feels like real masonry
-const ASPECTS = ['9/16', '4/3', '16/9', '1/1', '9/16', '3/4', '16/9', '4/3']
-export default {
-  methods: {
-    getAspect(col, row) {
-      return ASPECTS[(col * 2 + row) % ASPECTS.length]
-    }
-  }
-}
-</script>
 
 <style scoped>
 .skeleton-masonry {

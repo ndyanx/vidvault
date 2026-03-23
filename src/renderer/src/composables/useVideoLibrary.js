@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue'
+import { formatSize } from '../utils/format.js'
 
 const MAX_HISTORY = 8
 
@@ -10,13 +11,6 @@ const folderHistory = ref([])
 
 const isElectron = typeof window !== 'undefined' && typeof window.electronAPI !== 'undefined'
 const store = isElectron ? window.electronAPI.store : null
-
-function formatSize(bytes) {
-  if (!bytes) return '—'
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
-}
 
 function folderNameFrom(folderPath) {
   return folderPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || folderPath
@@ -123,14 +117,6 @@ export function useVideoLibrary() {
     error.value = null
   }
 
-  function updateVideoDimensions(id, width, height) {
-    const video = videos.value.find((v) => v.id === id)
-    if (video) {
-      video.width = width
-      video.height = height
-    }
-  }
-
   async function init() {
     if (!isElectron) return
     const state = await store.getAll()
@@ -154,7 +140,6 @@ export function useVideoLibrary() {
     closeFolder,
     deleteFromHistory,
     dismissError,
-    updateVideoDimensions,
     init
   }
 }

@@ -1,5 +1,6 @@
 <script setup>
 import { ref, watch, nextTick } from 'vue'
+import { formatSize, formatDuration } from '../utils/format.js'
 
 const props = defineProps({
   video: { type: Object, default: null },
@@ -12,10 +13,13 @@ const emit = defineEmits(['close', 'prev', 'next'])
 const videoRef = ref(null)
 const copied = ref(false)
 
-// Play/reset when video changes
+// Play/reset when video changes; pause before switching or closing
 watch(
   () => props.video,
   async (newVideo) => {
+    if (videoRef.value && !videoRef.value.paused) {
+      videoRef.value.pause()
+    }
     if (newVideo && videoRef.value) {
       await nextTick()
       videoRef.value.load()
@@ -23,23 +27,6 @@ watch(
     }
   }
 )
-
-function formatSize(bytes) {
-  if (!bytes) return '—'
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
-}
-
-function formatDuration(seconds) {
-  if (!seconds) return null
-  const s = Math.round(seconds)
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-  return `${m}:${String(sec).padStart(2, '0')}`
-}
 
 async function copyPath() {
   if (!props.video) return
