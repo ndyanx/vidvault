@@ -1,27 +1,61 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useVideoLibrary } from '../composables/useVideoLibrary.js'
+import { useFavorites } from '../composables/useFavorites.js'
 import VideoSkeleton from './VideoSkeleton.vue'
 import VideoModal from './VideoModal.vue'
 
 const { videos, isLoading } = useVideoLibrary()
+const { isFavorite, toggle: toggleFavorite } = useFavorites()
 
 // ─── Constants ────────────────────────────────────────────────────────────
 const GAP = 10
 const VIEWPORT_MARGIN = 400
 const DEFAULT_RATIO = 9 / 16
 
-// ─── Refs ──────────────────────────────────────────────────────────────────
+// ─── Search / filter / sort ────────────────────────────────────────────────
+const searchQuery = ref('')
+const showFavoritesOnly = ref(false)
+const sortBy = ref('date') // 'date' | 'name' | 'size' | 'duration'
+
+const SORT_OPTIONS = [
+  { value: 'date', label: 'Fecha' },
+  { value: 'name', label: 'Nombre' },
+  { value: 'size', label: 'Tamaño' },
+  { value: 'duration', label: 'Duración' }
+]
+
+const filteredVideos = computed(() => {
+  let list = videos.value
+
+  const q = searchQuery.value.trim().toLowerCase()
+  if (q) list = list.filter((v) => v.fileName.toLowerCase().includes(q))
+
+  if (showFavoritesOnly.value) list = list.filter((v) => isFavorite(v.id))
+
+  list = [...list]
+  switch (sortBy.value) {
+    case 'name':
+      list.sort((a, b) => a.fileName.localeCompare(b.fileName))
+      break
+    case 'size':
+      list.sort((a, b) => (b.size || 0) - (a.size || 0))
+      break
+    case 'duration':
+      list.sort((a, b) => (b.duration || 0) - (a.duration || 0))
+      break
+    // 'date': already sorted by main process
+  }
+
+  return list
+})
+
+// ─── Layout ────────────────────────────────────────────────────────────────
 const rootRef = ref(null)
 const colCount = ref(4)
 const colWidth = ref(200)
 const scrollTop = ref(0)
 const containerHeight = ref(0)
-
-// ─── Layout ────────────────────────────────────────────────────────────────
-// layoutItems[i] = { id, video, x, y, width, height }
-// Keeping video ref here is fine — it's a single shared reactive object,
-// not duplicated data (no large buffers, just metadata).
 const layoutItems = ref([])
 
 function buildLayout(vids, cols, cw) {
@@ -30,27 +64,21 @@ function buildLayout(vids, cols, cw) {
     containerHeight.value = 0
     return
   }
-
   const colHeights = new Array(cols).fill(0)
   const items = []
-
   for (let i = 0; i < vids.length; i++) {
     const video = vids[i]
-
     let minCol = 0
     for (let c = 1; c < cols; c++) {
       if (colHeights[c] < colHeights[minCol]) minCol = c
     }
-
     const ratio = video.width && video.height ? video.width / video.height : DEFAULT_RATIO
     const cardHeight = Math.round(cw / ratio)
     const x = minCol * (cw + GAP)
     const y = colHeights[minCol]
-
     items.push({ id: video.id, video, x, y, width: cw, height: cardHeight })
     colHeights[minCol] += cardHeight + GAP
   }
-
   layoutItems.value = items
   containerHeight.value = Math.max(...colHeights)
 }
@@ -61,18 +89,13 @@ const viewportHeight = ref(800)
 const visibleItems = computed(() => {
   const top = scrollTop.value - VIEWPORT_MARGIN
   const bottom = scrollTop.value + viewportHeight.value + VIEWPORT_MARGIN
-  return layoutItems.value.filter((item) => {
-    const itemBottom = item.y + item.height
-    return itemBottom > top && item.y < bottom
-  })
+  return layoutItems.value.filter((item) => item.y + item.height > top && item.y < bottom)
 })
 
-// ─── Scroll ────────────────────────────────────────────────────────────────
 const handleScroll = (e) => {
   scrollTop.value = e.target.scrollTop
 }
 
-// ─── Responsive columns ────────────────────────────────────────────────────
 const getColsForWidth = (w) => {
   if (w < 480) return 1
   if (w < 720) return 2
@@ -89,23 +112,93 @@ const updateLayout = () => {
   const cw = Math.floor((w - (cols - 1) * GAP) / cols)
   colCount.value = cols
   colWidth.value = cw
-  buildLayout(videos.value, cols, cw)
+  buildLayout(filteredVideos.value, cols, cw)
 }
 
 let resizeObserver = null
+watch(filteredVideos, () => nextTick(() => updateLayout()), { flush: 'post' })
 
-// ─── Rebuild layout when videos change (e.g. thumbnails updating dimensions)
-watch(videos, () => nextTick(() => updateLayout()), { flush: 'post', deep: false })
+// ─── Context menu ──────────────────────────────────────────────────────────
+const ctxMenu = ref(null)
+const ctxRef = ref(null)
 
-// ─── Modal ─────────────────────────────────────────────────────────────────
+const openContextMenu = (e, video) => {
+  e.preventDefault()
+  // Clamp to viewport so menu doesn't go offscreen
+  const menuW = 190,
+    menuH = 160
+  const x = Math.min(e.clientX, window.innerWidth - menuW - 8)
+  const y = Math.min(e.clientY, window.innerHeight - menuH - 8)
+  ctxMenu.value = { video, x, y }
+}
+
+const closeContextMenu = () => {
+  ctxMenu.value = null
+}
+
+const ctxShowInFolder = () => {
+  window.electronAPI?.showInFolder(ctxMenu.value.video.filePath)
+  closeContextMenu()
+}
+const ctxCopyPath = async () => {
+  await window.electronAPI?.copyPath(ctxMenu.value.video.filePath)
+  closeContextMenu()
+}
+const ctxToggleFavorite = () => {
+  toggleFavorite(ctxMenu.value.video.id)
+  closeContextMenu()
+}
+const ctxOpenModal = () => {
+  openModal(ctxMenu.value.video)
+  closeContextMenu()
+}
+
+const handleGlobalMousedown = (e) => {
+  if (ctxRef.value && !ctxRef.value.contains(e.target)) closeContextMenu()
+}
+
+// ─── Duration formatting ───────────────────────────────────────────────────
+function formatDuration(seconds) {
+  if (!seconds) return null
+  const s = Math.round(seconds)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+  return `${m}:${String(sec).padStart(2, '0')}`
+}
+
+// ─── Modal + keyboard nav ──────────────────────────────────────────────────
 const modalVideo = ref(null)
+const modalIndex = ref(-1)
 
 const openModal = (video) => {
   modalVideo.value = video
+  modalIndex.value = filteredVideos.value.findIndex((v) => v.id === video.id)
 }
 
 const closeModal = () => {
   modalVideo.value = null
+  modalIndex.value = -1
+}
+
+const navigateModal = (dir) => {
+  const list = filteredVideos.value
+  if (!list.length) return
+  const next = modalIndex.value + dir
+  if (next < 0 || next >= list.length) return
+  modalIndex.value = next
+  modalVideo.value = list[next]
+}
+
+const handleKey = (e) => {
+  if (e.key === 'Escape' && ctxMenu.value) {
+    closeContextMenu()
+    return
+  }
+  if (!modalVideo.value) return
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') navigateModal(1)
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') navigateModal(-1)
 }
 
 // ─── Lifecycle ─────────────────────────────────────────────────────────────
@@ -113,16 +206,103 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(() => updateLayout())
   if (rootRef.value) resizeObserver.observe(rootRef.value)
   updateLayout()
+  document.addEventListener('keydown', handleKey)
+  document.addEventListener('mousedown', handleGlobalMousedown)
 })
 
 onUnmounted(() => {
   resizeObserver?.disconnect()
+  document.removeEventListener('keydown', handleKey)
+  document.removeEventListener('mousedown', handleGlobalMousedown)
 })
 </script>
 
 <template>
   <div class="gallery-root" ref="rootRef" @scroll="handleScroll">
-    <!-- Skeleton while loading -->
+    <!-- ── Toolbar ──────────────────────────────────────────────────────── -->
+    <div class="gallery-toolbar" v-if="!isLoading && videos.length">
+      <div class="search-wrap">
+        <svg
+          class="search-icon"
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.5"
+        >
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+        <input
+          v-model="searchQuery"
+          class="search-input"
+          placeholder="Buscar por nombre…"
+          spellcheck="false"
+        />
+        <button v-if="searchQuery" class="search-clear" @click="searchQuery = ''">
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+          >
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+
+      <div class="sort-wrap">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.5"
+        >
+          <line x1="3" y1="6" x2="21" y2="6" />
+          <line x1="3" y1="12" x2="14" y2="12" />
+          <line x1="3" y1="18" x2="8" y2="18" />
+        </svg>
+        <select v-model="sortBy" class="sort-select">
+          <option v-for="opt in SORT_OPTIONS" :key="opt.value" :value="opt.value">
+            {{ opt.label }}
+          </option>
+        </select>
+      </div>
+
+      <button
+        class="fav-filter-btn"
+        :class="{ active: showFavoritesOnly }"
+        @click="showFavoritesOnly = !showFavoritesOnly"
+        title="Solo favoritos"
+      >
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          :fill="showFavoritesOnly ? 'currentColor' : 'none'"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <polygon
+            points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
+          />
+        </svg>
+        <span>Favoritos</span>
+        <span v-if="showFavoritesOnly" class="fav-count">{{ filteredVideos.length }}</span>
+      </button>
+
+      <span class="result-count" v-if="searchQuery || showFavoritesOnly">
+        {{ filteredVideos.length }} resultado{{ filteredVideos.length !== 1 ? 's' : '' }}
+      </span>
+    </div>
+
+    <!-- Skeleton -->
     <VideoSkeleton v-if="isLoading" :count="16" :cols="colCount" />
 
     <!-- Virtual canvas -->
@@ -143,8 +323,8 @@ onUnmounted(() => {
           height: item.height + 'px'
         }"
         @click="openModal(item.video)"
+        @contextmenu="openContextMenu($event, item.video)"
       >
-        <!-- Thumbnail image — shows skeleton shimmer until thumbnailUrl arrives -->
         <Transition name="thumb-fade">
           <img
             v-if="item.video.thumbnailUrl"
@@ -153,11 +333,38 @@ onUnmounted(() => {
             class="card-thumb"
             draggable="false"
             loading="lazy"
+            decoding="async"
           />
           <div v-else class="card-thumb-placeholder">
             <div class="thumb-shimmer" />
           </div>
         </Transition>
+
+        <!-- Favorite button -->
+        <button
+          class="card-fav-btn"
+          :class="{ active: isFavorite(item.video.id) }"
+          @click.stop="toggleFavorite(item.video.id)"
+          title="Favorito"
+        >
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            :fill="isFavorite(item.video.id) ? 'currentColor' : 'none'"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <polygon
+              points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
+            />
+          </svg>
+        </button>
+
+        <!-- Duration badge -->
+        <div v-if="formatDuration(item.video.duration)" class="card-duration">
+          {{ formatDuration(item.video.duration) }}
+        </div>
 
         <!-- Hover overlay -->
         <div class="card-overlay">
@@ -168,7 +375,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- Play icon (always visible on hover) -->
+        <!-- Play icon -->
         <div class="card-play-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
             <polygon points="5 3 19 12 5 21 5 3" />
@@ -176,23 +383,103 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Footer -->
       <div
         class="gallery-footer"
         :class="{ 'modal-open': !!modalVideo }"
         :style="{ top: containerHeight + 8 + 'px' }"
       >
-        {{ videos.length }} video{{ videos.length !== 1 ? 's' : '' }} · {{ visibleItems.length }} en
-        pantalla
+        {{ filteredVideos.length }} video{{ filteredVideos.length !== 1 ? 's' : '' }}
+        <template v-if="filteredVideos.length !== videos.length"> de {{ videos.length }}</template>
+        · {{ visibleItems.length }} en pantalla
       </div>
     </div>
 
-    <!-- Empty -->
+    <!-- Empty search -->
+    <div v-else-if="!isLoading && (searchQuery || showFavoritesOnly)" class="gallery-empty">
+      <svg
+        width="28"
+        height="28"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+      >
+        <circle cx="11" cy="11" r="8" />
+        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      </svg>
+      <p>
+        Sin resultados para <em>{{ searchQuery || 'favoritos' }}</em>
+      </p>
+    </div>
+
+    <!-- Empty folder -->
     <div v-else-if="!isLoading" class="gallery-empty">
       <p>No se encontraron videos en esta carpeta.</p>
     </div>
 
-    <VideoModal :video="modalVideo" @close="closeModal" />
+    <!-- Context menu -->
+    <Teleport to="body">
+      <div
+        v-if="ctxMenu"
+        ref="ctxRef"
+        class="ctx-menu"
+        :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+      >
+        <button class="ctx-item" @click="ctxOpenModal">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          Reproducir
+        </button>
+        <button class="ctx-item" @click="ctxToggleFavorite">
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            :fill="ctxMenu && isFavorite(ctxMenu.video.id) ? 'currentColor' : 'none'"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <polygon
+              points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
+            />
+          </svg>
+          {{ ctxMenu && isFavorite(ctxMenu.video.id) ? 'Quitar favorito' : 'Marcar favorito' }}
+        </button>
+        <div class="ctx-divider" />
+        <button class="ctx-item" @click="ctxShowInFolder">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+            <path
+              d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
+            />
+          </svg>
+          Mostrar en carpeta
+        </button>
+        <button class="ctx-item" @click="ctxCopyPath">
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <rect x="9" y="9" width="13" height="13" rx="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+          Copiar ruta
+        </button>
+      </div>
+    </Teleport>
+
+    <VideoModal
+      :video="modalVideo"
+      :has-prev="modalIndex > 0"
+      :has-next="modalIndex < filteredVideos.length - 1"
+      @close="closeModal"
+      @prev="navigateModal(-1)"
+      @next="navigateModal(1)"
+    />
   </div>
 </template>
 
@@ -201,17 +488,147 @@ onUnmounted(() => {
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 16px;
+  padding: 12px 16px 16px;
   position: relative;
   scroll-behavior: smooth;
 }
 
+/* ─── Toolbar ─────────────────────────────────────────────────────────────── */
+.gallery-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 160px;
+  max-width: 320px;
+}
+
+.search-icon {
+  position: absolute;
+  left: 9px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+.search-input {
+  width: 100%;
+  padding: 6px 28px 6px 28px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.search-input::placeholder {
+  color: var(--text-tertiary);
+}
+.search-input:focus {
+  border-color: var(--accent);
+}
+
+.search-clear {
+  position: absolute;
+  right: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  background: var(--text-tertiary);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  color: var(--bg-elevated);
+  padding: 0;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+.search-clear:hover {
+  opacity: 1;
+}
+
+.sort-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-tertiary);
+}
+
+.sort-select {
+  padding: 5px 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.sort-select:focus {
+  border-color: var(--accent);
+}
+
+.fav-filter-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.fav-filter-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.fav-filter-btn.active {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.fav-count {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 8px;
+}
+
+.result-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+/* ─── Canvas ──────────────────────────────────────────────────────────────── */
 .gallery-canvas {
   position: relative;
   width: 100%;
 }
 
-/* ─── Card ─────────────────────────────────────────────────────────────── */
+/* ─── Card ────────────────────────────────────────────────────────────────── */
 .gallery-card {
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -223,7 +640,6 @@ onUnmounted(() => {
     box-shadow 0.2s ease,
     border-color 0.2s ease;
 }
-
 .gallery-card:hover {
   will-change: transform;
   transform: scale(1.018);
@@ -231,17 +647,18 @@ onUnmounted(() => {
   border-color: transparent;
   z-index: 10;
 }
-
 .gallery-card:hover .card-overlay {
   opacity: 1;
 }
-
 .gallery-card:hover .card-play-icon {
   opacity: 1;
   transform: translate(-50%, -50%) scale(1);
 }
+.gallery-card:hover .card-fav-btn {
+  opacity: 1;
+}
 
-/* ─── Thumbnail ─────────────────────────────────────────────────────────── */
+/* ─── Thumbnail ───────────────────────────────────────────────────────────── */
 .card-thumb,
 .card-thumb-placeholder {
   position: absolute;
@@ -250,17 +667,14 @@ onUnmounted(() => {
   height: 100%;
   display: block;
 }
-
 .card-thumb {
   object-fit: cover;
 }
-
 .card-thumb-placeholder {
   background: var(--bg-elevated);
   overflow: hidden;
 }
 
-/* Shimmer inside placeholder while thumbnail loads */
 .thumb-shimmer {
   position: absolute;
   inset: 0;
@@ -273,7 +687,6 @@ onUnmounted(() => {
   background-size: 200% 100%;
   animation: shimmer-slide 1.8s ease-in-out infinite;
 }
-
 [data-theme='light'] .thumb-shimmer {
   background: linear-gradient(
     105deg,
@@ -283,7 +696,6 @@ onUnmounted(() => {
   );
   background-size: 200% 100%;
 }
-
 @keyframes shimmer-slide {
   0% {
     background-position: -200% 0;
@@ -292,8 +704,6 @@ onUnmounted(() => {
     background-position: 200% 0;
   }
 }
-
-/* Smooth thumbnail appearance */
 .thumb-fade-enter-active {
   transition: opacity 0.3s ease;
 }
@@ -301,7 +711,58 @@ onUnmounted(() => {
   opacity: 0;
 }
 
-/* ─── Overlay ─────────────────────────────────────────────────────────── */
+/* ─── Favorite button ─────────────────────────────────────────────────────── */
+.card-fav-btn {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.7);
+  opacity: 0;
+  transition:
+    opacity 0.2s,
+    color 0.15s,
+    background 0.15s;
+  padding: 0;
+}
+.card-fav-btn.active {
+  opacity: 1 !important;
+  color: #f5c518;
+}
+.card-fav-btn:hover {
+  color: #f5c518;
+  background: rgba(0, 0, 0, 0.65);
+}
+
+/* ─── Duration badge ──────────────────────────────────────────────────────── */
+.card-duration {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 3;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(3px);
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.03em;
+  pointer-events: none;
+}
+
+/* ─── Overlay ─────────────────────────────────────────────────────────────── */
 .card-overlay {
   position: absolute;
   bottom: 0;
@@ -314,7 +775,6 @@ onUnmounted(() => {
   pointer-events: none;
   z-index: 2;
 }
-
 .card-filename {
   display: block;
   font-family: var(--font-mono);
@@ -325,13 +785,11 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   margin-bottom: 3px;
 }
-
 .card-meta-row {
   display: flex;
   align-items: center;
   gap: 5px;
 }
-
 .card-ext {
   font-family: var(--font-mono);
   font-size: 8.5px;
@@ -341,14 +799,13 @@ onUnmounted(() => {
   padding: 1px 5px;
   border-radius: 3px;
 }
-
 .card-size {
   font-family: var(--font-mono);
   font-size: 9px;
   color: rgba(255, 255, 255, 0.5);
 }
 
-/* ─── Play icon ─────────────────────────────────────────────────────────── */
+/* ─── Play icon ───────────────────────────────────────────────────────────── */
 .card-play-icon {
   position: absolute;
   top: 50%;
@@ -372,7 +829,51 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-/* ─── Footer ─────────────────────────────────────────────────────────────── */
+/* ─── Context menu ────────────────────────────────────────────────────────── */
+.ctx-menu {
+  position: fixed;
+  z-index: 9000;
+  min-width: 190px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal);
+  padding: 4px;
+}
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s;
+}
+.ctx-item svg {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.ctx-item:hover {
+  background: var(--bg-app);
+}
+.ctx-item:hover svg {
+  color: var(--accent);
+}
+.ctx-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 3px 0;
+}
+
+/* ─── Footer ──────────────────────────────────────────────────────────────── */
 .gallery-footer {
   position: absolute;
   left: 0;
@@ -385,19 +886,24 @@ onUnmounted(() => {
   letter-spacing: 0.03em;
   transition: opacity 0.25s;
 }
-
 .gallery-footer.modal-open {
   opacity: 0;
 }
 
-/* ─── Empty ──────────────────────────────────────────────────────────────── */
+/* ─── Empty ───────────────────────────────────────────────────────────────── */
 .gallery-empty {
-  height: 100%;
+  height: calc(100% - 60px);
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 10px;
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text-tertiary);
+}
+.gallery-empty em {
+  color: var(--text-secondary);
+  font-style: normal;
 }
 </style>

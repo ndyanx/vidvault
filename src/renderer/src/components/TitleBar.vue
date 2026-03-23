@@ -39,15 +39,12 @@ const removeFolder = (e, path) => {
 }
 
 const handleOutsideClick = (e) => {
-  if (!e.target.closest('.folder-control')) {
-    showHistory.value = false
-  }
+  if (!e.target.closest('.folder-control')) showHistory.value = false
 }
 
 onMounted(() => document.addEventListener('mousedown', handleOutsideClick))
 onUnmounted(() => document.removeEventListener('mousedown', handleOutsideClick))
 
-// ─── Relative time ─────────────────────────────────────────────────────────
 function relativeTime(ts) {
   const diff = Date.now() - ts
   const m = Math.floor(diff / 60000)
@@ -64,13 +61,12 @@ function relativeTime(ts) {
   <header class="titlebar">
     <div class="traffic-lights-spacer" />
 
-    <!-- Brand -->
     <div class="titlebar-brand">
       <span class="brand-icon">▣</span>
       <span class="brand-name">VidVault</span>
     </div>
 
-    <!-- Center: folder pill with history dropdown -->
+    <!-- Center: folder pill -->
     <div class="titlebar-center">
       <div class="folder-control" v-if="currentFolder">
         <button class="folder-pill" @click="toggleHistory" :title="currentFolder">
@@ -109,11 +105,9 @@ function relativeTime(ts) {
           </svg>
         </button>
 
-        <!-- History dropdown -->
         <Transition name="dropdown">
           <div v-if="showHistory" class="history-dropdown">
             <div class="dropdown-header">Recientes</div>
-
             <button
               v-for="entry in folderHistory"
               :key="entry.path"
@@ -143,7 +137,7 @@ function relativeTime(ts) {
                 <button
                   class="history-remove"
                   @click="removeFolder($event, entry.path)"
-                  title="Eliminar del historial"
+                  title="Eliminar"
                 >
                   <svg
                     width="10"
@@ -159,9 +153,7 @@ function relativeTime(ts) {
                 </button>
               </div>
             </button>
-
             <div class="dropdown-divider" />
-
             <button
               class="history-open-new"
               @click="
@@ -189,7 +181,7 @@ function relativeTime(ts) {
         class="ctrl-btn open-btn"
         @click="openFolderDialog"
         :disabled="isLoading"
-        title="Abrir carpeta de videos"
+        title="Abrir carpeta"
       >
         <svg v-if="!isLoading" width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
           <path
@@ -211,7 +203,6 @@ function relativeTime(ts) {
         <span>{{ isLoading ? 'Cargando…' : 'Abrir carpeta' }}</span>
       </button>
 
-      <!-- Theme toggle -->
       <button
         class="ctrl-btn icon-btn"
         @click="$emit('toggle-theme')"
@@ -266,7 +257,6 @@ function relativeTime(ts) {
   position: relative;
   z-index: 200;
 }
-
 button,
 a,
 input {
@@ -297,7 +287,6 @@ input {
   color: var(--text-primary);
 }
 
-/* ─── Center ──────────────────────────────────────────────────────────────── */
 .titlebar-center {
   flex: 1;
   display: flex;
@@ -374,11 +363,11 @@ input {
   border-radius: 50%;
   cursor: pointer;
   color: var(--text-tertiary);
+  flex-shrink: 0;
   transition:
     background 0.15s,
     color 0.15s,
     border-color 0.15s;
-  flex-shrink: 0;
 }
 .close-folder-btn:hover {
   background: rgba(220, 50, 40, 0.12);
@@ -386,7 +375,7 @@ input {
   color: #dc3228;
 }
 
-/* ─── History dropdown ────────────────────────────────────────────────────── */
+/* History dropdown */
 .history-dropdown {
   position: absolute;
   top: calc(100% + 8px);
@@ -400,7 +389,6 @@ input {
   overflow: hidden;
   z-index: 999;
 }
-
 .dropdown-header {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -437,7 +425,6 @@ input {
   min-width: 0;
   flex: 1;
 }
-
 .history-icon {
   color: var(--text-tertiary);
   flex-shrink: 0;
@@ -452,7 +439,6 @@ input {
   min-width: 0;
   gap: 1px;
 }
-
 .history-name {
   font-family: var(--font-display);
   font-size: 12px;
@@ -462,7 +448,6 @@ input {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
 .history-path {
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -478,7 +463,6 @@ input {
   gap: 6px;
   flex-shrink: 0;
 }
-
 .history-time {
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -536,7 +520,7 @@ input {
   background: var(--accent-subtle);
 }
 
-/* ─── Right controls ──────────────────────────────────────────────────────── */
+/* Right controls */
 .titlebar-controls {
   display: flex;
   align-items: center;
@@ -603,7 +587,6 @@ input {
   }
 }
 
-/* Dropdown transition */
 .dropdown-enter-active {
   transition:
     opacity 0.15s ease,

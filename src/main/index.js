@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, shell, clipboard } from 'electron'
 import { join, extname } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import {
@@ -8,10 +8,12 @@ import {
   existsSync,
   readFileSync,
   writeFileSync,
-  mkdirSync
+  mkdirSync,
+  renameSync
 } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { createHash } from 'crypto'
 
 const execFileAsync = promisify(execFile)
 
@@ -58,16 +60,122 @@ protocol.registerSchemesAsPrivileged([
   }
 ])
 
-// ─── Cache helpers ─────────────────────────────────────────────────────────
-// dimensions-cache.json  → { [filePath]: { width, height, duration, mtime } }
-// thumbnails live in     → userData/thumbnails/{id}.jpg  (keyed by video id)
+// ─── app-state.json ────────────────────────────────────────────────────────
+// Single JSON file in userData that replaces all localStorage usage.
+// Shape: { lastFolder, folderHistory, favorites }
+// - lastFolder:    string | null
+// - folderHistory: [{ path, name, lastOpened }]   max 8 entries
+// - favorites:     string[]                        video IDs
 
+const MAX_HISTORY = 8
+
+function getStatePath() {
+  return join(app.getPath('userData'), 'app-state.json')
+}
+
+const DEFAULT_STATE = { lastFolder: null, folderHistory: [], favorites: [] }
+
+function loadState() {
+  try {
+    const p = getStatePath()
+    if (existsSync(p)) {
+      const parsed = JSON.parse(readFileSync(p, 'utf-8'))
+      // Merge with defaults so missing keys don't break older installs
+      return { ...DEFAULT_STATE, ...parsed }
+    }
+  } catch {
+    /* corrupt — start fresh */
+  }
+  return { ...DEFAULT_STATE }
+}
+
+function saveState(state) {
+  try {
+    writeFileSync(getStatePath(), JSON.stringify(state, null, 2), 'utf-8')
+  } catch (err) {
+    console.error('[state] Failed to save:', err)
+  }
+}
+
+// In-memory copy so we don't read from disk on every IPC call
+let appState = null
+
+function getState() {
+  if (!appState) appState = loadState()
+  return appState
+}
+
+function patchState(updater) {
+  const s = getState()
+  updater(s)
+  saveState(s)
+  return s
+}
+
+// ─── IPC: app-state store ──────────────────────────────────────────────────
+// Thin key-based API so the renderer doesn't need to know the full structure.
+// Supported keys: 'lastFolder', 'folderHistory', 'favorites'
+
+ipcMain.handle('store:get', (_event, key) => {
+  return getState()[key] ?? null
+})
+
+ipcMain.handle('store:set', (_event, key, value) => {
+  patchState((s) => {
+    s[key] = value
+  })
+})
+
+ipcMain.handle('store:getAll', () => {
+  return getState()
+})
+
+// ─── dimensions-cache.json ─────────────────────────────────────────────────
 function getCachePath() {
   return join(app.getPath('userData'), 'dimensions-cache.json')
 }
 
 function getThumbnailDir() {
   return join(app.getPath('userData'), 'thumbnails')
+}
+
+/**
+ * Bucketed thumbnail path: thumbnails/{xx}/{yy}/{sha1hash}.jpg
+ * SHA-1 of filePath → uniform distribution, ~13 files/leaf at 3,500 thumbs.
+ */
+function thumbPathForFile(filePath) {
+  const hash = createHash('sha1').update(filePath).digest('hex')
+  const l1 = hash.slice(0, 2)
+  const l2 = hash.slice(2, 4)
+  return {
+    hash,
+    dir: join(getThumbnailDir(), l1, l2),
+    path: join(getThumbnailDir(), l1, l2, `${hash}.jpg`)
+  }
+}
+
+/**
+ * One-time migration: flat thumbnails/{base64id}.jpg → bucketed layout.
+ * Runs via setImmediate so it never delays startup.
+ */
+function migrateFlatThumbnails(cache) {
+  const thumbDir = getThumbnailDir()
+  let moved = 0
+  for (const filePath of Object.keys(cache)) {
+    const oldId = Buffer.from(filePath).toString('base64').replace(/[+/=]/g, '_')
+    const oldPath = join(thumbDir, `${oldId}.jpg`)
+    if (!existsSync(oldPath)) continue
+    const { dir: newDir, path: newPath } = thumbPathForFile(filePath)
+    if (existsSync(newPath)) continue
+    try {
+      if (!existsSync(newDir)) mkdirSync(newDir, { recursive: true })
+      renameSync(oldPath, newPath)
+      moved++
+    } catch (err) {
+      console.warn(`[migrate] Could not move ${oldPath}:`, err.message)
+    }
+  }
+  if (moved > 0) console.log(`[migrate] Moved ${moved} thumbnails to bucketed layout`)
 }
 
 function loadCache() {
@@ -82,16 +190,13 @@ function loadCache() {
 
 function saveCache(cache) {
   try {
-    const p = getCachePath()
-    const dir = join(p, '..')
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    writeFileSync(p, JSON.stringify(cache), 'utf-8')
+    writeFileSync(getCachePath(), JSON.stringify(cache), 'utf-8')
   } catch (err) {
     console.error('[cache] Failed to save:', err)
   }
 }
 
-// ─── ffprobe: get dimensions + duration ───────────────────────────────────
+// ─── ffprobe ───────────────────────────────────────────────────────────────
 async function getVideoDimensions(filePath) {
   try {
     const { stdout } = await execFileAsync(
@@ -99,17 +204,14 @@ async function getVideoDimensions(filePath) {
       ['-v', 'quiet', '-print_format', 'json', '-show_streams', '-select_streams', 'v:0', filePath],
       { timeout: 8000 }
     )
-    const data = JSON.parse(stdout)
-    const stream = data.streams?.[0]
+    const stream = JSON.parse(stdout).streams?.[0]
     if (!stream) return null
-
     const width = stream.coded_width || stream.width
     const height = stream.coded_height || stream.height
     const rotation = Math.abs(
       parseInt(stream.tags?.rotate || stream.side_data_list?.[0]?.rotation || '0', 10)
     )
     const isRotated = rotation === 90 || rotation === 270
-
     return {
       width: isRotated ? height : width,
       height: isRotated ? width : height,
@@ -120,33 +222,26 @@ async function getVideoDimensions(filePath) {
   }
 }
 
-// ─── ffmpeg: extract a single thumbnail frame ──────────────────────────────
-// Seeks to 10% of duration (or 1s fallback) for a representative frame.
-// Saves as JPEG to thumbnailDir/{id}.jpg
-async function generateThumbnail(filePath, id, duration) {
-  const thumbDir = getThumbnailDir()
-  if (!existsSync(thumbDir)) mkdirSync(thumbDir, { recursive: true })
-
-  const outPath = join(thumbDir, `${id}.jpg`)
-
-  // Pick seek time: 10% into video, min 1s, max 30s
+// ─── ffmpeg thumbnail ──────────────────────────────────────────────────────
+async function generateThumbnail(filePath, duration) {
+  const { dir, path: outPath } = thumbPathForFile(filePath)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   const seekTime = duration ? Math.min(Math.max(duration * 0.1, 1), 30).toFixed(2) : '1'
-
   try {
     await execFileAsync(
       'ffmpeg',
       [
         '-ss',
-        seekTime, // seek before input for speed
+        seekTime,
         '-i',
         filePath,
         '-frames:v',
-        '1', // single frame
+        '1',
         '-vf',
-        'scale=480:-2', // scale to 480px wide, keep aspect
+        'scale=480:-2',
         '-q:v',
-        '2', // JPEG quality (2=best, 31=worst)
-        '-y', // overwrite
+        '2',
+        '-y',
         outPath
       ],
       { timeout: 15000 }
@@ -188,9 +283,7 @@ function createWindow() {
       sandbox: false
     }
   })
-
   win.on('ready-to-show', () => win.show())
-
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     win.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
@@ -198,13 +291,11 @@ function createWindow() {
   }
 }
 
+// ─── App ready ────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
-  // ─── localvideo:// protocol with Range Request support ────────────────
   protocol.handle('localvideo', (request) => {
     try {
-      const encoded = request.url.slice('localvideo://local/'.length)
-      const filePath = decodeURIComponent(encoded)
-
+      const filePath = decodeURIComponent(request.url.slice('localvideo://local/'.length))
       let stat
       try {
         stat = statSync(filePath)
@@ -216,24 +307,20 @@ app.whenReady().then(() => {
       const ext = extname(filePath).toLowerCase()
       const mimeType =
         ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : MIME_TYPES[ext] || 'video/mp4'
-
       const rangeHeader = request.headers.get('range')
 
       if (rangeHeader) {
         const match = rangeHeader.match(/bytes=(\d+)-(\d*)/)
         if (!match) return new Response('Invalid Range', { status: 416 })
-
         const start = parseInt(match[1], 10)
         const end = match[2] ? parseInt(match[2], 10) : fileSize - 1
         const chunkSize = end - start + 1
-
         if (start >= fileSize || end >= fileSize || start > end) {
           return new Response('Range Not Satisfiable', {
             status: 416,
             headers: { 'Content-Range': `bytes */${fileSize}` }
           })
         }
-
         return new Response(nodeStreamToWebStream(createReadStream(filePath, { start, end })), {
           status: 206,
           headers: {
@@ -261,6 +348,11 @@ app.whenReady().then(() => {
 
   electronApp.setAppUserModelId('com.vidvault')
   app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
+
+  // Preload state into memory + run migrations in background
+  getState()
+  setImmediate(() => migrateFlatThumbnails(loadCache()))
+
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -282,21 +374,15 @@ ipcMain.handle('dialog:openFolder', async () => {
 })
 
 // ─── IPC: Read videos ─────────────────────────────────────────────────────
-// Returns immediately with videos (thumbnailUrl populated for cached ones).
-// Then generates missing thumbnails in background, pushing each via IPC.
 ipcMain.handle('fs:readVideos', async (event, dirPath) => {
   if (!dirPath) return []
-
   try {
-    const stat = statSync(dirPath)
-    if (!stat.isDirectory()) return { error: 'not_found' }
+    if (!statSync(dirPath).isDirectory()) return { error: 'not_found' }
   } catch {
     return { error: 'not_found' }
   }
 
-  // 1. Scan directory
   const rawVideos = []
-
   const walk = (currentPath) => {
     let entries
     try {
@@ -304,7 +390,6 @@ ipcMain.handle('fs:readVideos', async (event, dirPath) => {
     } catch {
       return
     }
-
     for (const entry of entries) {
       const fullPath = join(currentPath, entry.name)
       if (entry.isDirectory()) {
@@ -315,14 +400,12 @@ ipcMain.handle('fs:readVideos', async (event, dirPath) => {
       if (dotIndex === -1) continue
       const ext = entry.name.slice(dotIndex).toLowerCase()
       if (!VIDEO_EXTENSIONS.has(ext)) continue
-
       let fileStat
       try {
         fileStat = statSync(fullPath)
       } catch {
         continue
       }
-
       rawVideos.push({
         id: Buffer.from(fullPath).toString('base64').replace(/[+/=]/g, '_'),
         fileName: entry.name,
@@ -336,38 +419,32 @@ ipcMain.handle('fs:readVideos', async (event, dirPath) => {
       })
     }
   }
-
   walk(dirPath)
   rawVideos.sort((a, b) => b.modifiedAt - a.modifiedAt)
 
-  // 2. Dimensions cache
   const cache = loadCache()
   let cacheChanged = false
-
   const needDimProbe = rawVideos.filter((v) => {
-    const cached = cache[v.filePath]
-    return !cached || cached.mtime !== v.mtime
+    const c = cache[v.filePath]
+    return !c || c.mtime !== v.mtime
   })
-
   if (needDimProbe.length > 0) {
-    const tasks = needDimProbe.map((v) => async () => {
-      const dims = await getVideoDimensions(v.filePath)
-      if (dims) {
-        cache[v.filePath] = { ...dims, mtime: v.mtime }
-        cacheChanged = true
-      }
-    })
-    await runWithConcurrency(tasks, 8)
+    await runWithConcurrency(
+      needDimProbe.map((v) => async () => {
+        const dims = await getVideoDimensions(v.filePath)
+        if (dims) {
+          cache[v.filePath] = { ...dims, mtime: v.mtime }
+          cacheChanged = true
+        }
+      }),
+      8
+    )
   }
-
   if (cacheChanged) saveCache(cache)
-
-  // 3. Attach dimensions + thumbnail (if already cached on disk)
-  const thumbDir = getThumbnailDir()
 
   const videos = rawVideos.map((v) => {
     const dims = cache[v.filePath]
-    const thumbPath = join(thumbDir, `${v.id}.jpg`)
+    const { path: thumbPath } = thumbPathForFile(v.filePath)
     const thumbExists = existsSync(thumbPath)
     return {
       ...v,
@@ -378,37 +455,31 @@ ipcMain.handle('fs:readVideos', async (event, dirPath) => {
     }
   })
 
-  // 4. Return immediately so renderer can render the gallery now
-  // Videos with thumbnailUrl already set will show image instantly.
-  // The rest will get pushed once ffmpeg finishes.
-
-  // Fire-and-forget background thumbnail generation
-  const needThumb = videos.filter((v) => !v.thumbnailUrl)
-
+  // Skip audio-only files (no video stream = no width from ffprobe)
+  const needThumb = videos.filter((v) => !v.thumbnailUrl && v.width)
   if (needThumb.length > 0) {
-    // Don't await — run in background
     ;(async () => {
-      const tasks = needThumb.map((v) => async () => {
-        // Check sender is still alive before doing work
-        if (event.sender.isDestroyed()) return
-
-        const outPath = await generateThumbnail(v.filePath, v.id, v.duration)
-        if (!outPath) return
-        if (event.sender.isDestroyed()) return
-
-        event.sender.send('thumbnail:ready', {
-          id: v.id,
-          thumbnailUrl: `localvideo://local/${encodeURIComponent(outPath)}`
-        })
-      })
-
-      // Use concurrency 4 for thumbnails — ffmpeg is heavier than ffprobe
-      await runWithConcurrency(tasks, 4)
+      await runWithConcurrency(
+        needThumb.map((v) => async () => {
+          if (event.sender.isDestroyed()) return
+          const outPath = await generateThumbnail(v.filePath, v.duration)
+          if (!outPath || event.sender.isDestroyed()) return
+          event.sender.send('thumbnail:ready', {
+            id: v.id,
+            thumbnailUrl: `localvideo://local/${encodeURIComponent(outPath)}`
+          })
+        }),
+        4
+      )
     })()
   }
 
   return videos
 })
+
+// ─── IPC: Shell utilities ──────────────────────────────────────────────────
+ipcMain.handle('shell:showInFolder', (_event, filePath) => shell.showItemInFolder(filePath))
+ipcMain.handle('shell:copyPath', (_event, filePath) => clipboard.writeText(filePath))
 
 // ─── Helper: Node stream → Web ReadableStream ──────────────────────────────
 function nodeStreamToWebStream(nodeStream) {

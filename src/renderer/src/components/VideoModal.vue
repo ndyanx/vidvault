@@ -1,37 +1,28 @@
 <script setup>
-import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { ref, watch, nextTick } from 'vue'
 
 const props = defineProps({
-  video: { type: Object, default: null }
+  video: { type: Object, default: null },
+  hasPrev: { type: Boolean, default: false },
+  hasNext: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'prev', 'next'])
 
 const videoRef = ref(null)
+const copied = ref(false)
 
-// Play when modal opens, pause when closes
+// Play/reset when video changes
 watch(
   () => props.video,
   async (newVideo) => {
     if (newVideo && videoRef.value) {
       await nextTick()
+      videoRef.value.load()
       videoRef.value.play().catch(() => {})
     }
   }
 )
-
-// Close on Escape
-const handleKey = (e) => {
-  if (e.key === 'Escape') emit('close')
-}
-
-onMounted(() => {
-  document.addEventListener('keydown', handleKey)
-})
-
-onUnmounted(() => {
-  document.removeEventListener('keydown', handleKey)
-})
 
 function formatSize(bytes) {
   if (!bytes) return '—'
@@ -40,7 +31,29 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
-import { nextTick } from 'vue'
+function formatDuration(seconds) {
+  if (!seconds) return null
+  const s = Math.round(seconds)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+  return `${m}:${String(sec).padStart(2, '0')}`
+}
+
+async function copyPath() {
+  if (!props.video) return
+  await window.electronAPI?.copyPath(props.video.filePath)
+  copied.value = true
+  setTimeout(() => {
+    copied.value = false
+  }, 1800)
+}
+
+function showInFolder() {
+  if (!props.video) return
+  window.electronAPI?.showInFolder(props.video.filePath)
+}
 </script>
 
 <template>
@@ -54,12 +67,57 @@ import { nextTick } from 'vue'
               <span class="modal-ext-badge">{{ video.ext }}</span>
               <span class="modal-filename selectable">{{ video.fileName }}</span>
             </div>
+
             <div class="modal-meta">
               <span class="meta-chip">{{ formatSize(video.size) }}</span>
               <span v-if="video.width && video.height" class="meta-chip"
                 >{{ video.width }}×{{ video.height }}</span
               >
+              <span v-if="formatDuration(video.duration)" class="meta-chip">{{
+                formatDuration(video.duration)
+              }}</span>
             </div>
+
+            <!-- Action buttons -->
+            <div class="modal-actions">
+              <button
+                class="action-btn"
+                @click="copyPath"
+                :title="copied ? '¡Copiado!' : 'Copiar ruta'"
+              >
+                <svg
+                  v-if="!copied"
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <rect x="9" y="9" width="13" height="13" rx="2" />
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+                <svg
+                  v-else
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                >
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              </button>
+              <button class="action-btn" @click="showInFolder" title="Mostrar en carpeta">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+                  <path
+                    d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
+                  />
+                </svg>
+              </button>
+            </div>
+
             <button class="close-btn" @click="$emit('close')" title="Cerrar (Esc)">
               <svg
                 width="16"
@@ -75,16 +133,56 @@ import { nextTick } from 'vue'
             </button>
           </div>
 
-          <!-- Video -->
-          <div class="modal-video-wrap">
-            <video
-              ref="videoRef"
-              :src="video.videoUrl"
-              controls
-              autoplay
-              loop
-              class="modal-video"
-            />
+          <!-- Video + nav arrows -->
+          <div class="modal-video-area">
+            <!-- Prev -->
+            <button
+              v-if="hasPrev"
+              class="nav-btn nav-prev"
+              @click="$emit('prev')"
+              title="Anterior (←)"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+              >
+                <polyline points="15 18 9 12 15 6" />
+              </svg>
+            </button>
+
+            <div class="modal-video-wrap">
+              <video
+                ref="videoRef"
+                :src="video.videoUrl"
+                controls
+                autoplay
+                loop
+                class="modal-video"
+              />
+            </div>
+
+            <!-- Next -->
+            <button
+              v-if="hasNext"
+              class="nav-btn nav-next"
+              @click="$emit('next')"
+              title="Siguiente (→)"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+              >
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            </button>
           </div>
         </div>
       </div>
@@ -114,6 +212,7 @@ import { nextTick } from 'vue'
   gap: 12px;
 }
 
+/* ─── Header ──────────────────────────────────────────────────────────────── */
 .modal-header {
   display: flex;
   align-items: center;
@@ -167,6 +266,35 @@ import { nextTick } from 'vue'
   border-radius: 20px;
 }
 
+.modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.55);
+  transition:
+    background 0.15s,
+    color 0.15s,
+    border-color 0.15s;
+}
+.action-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: rgba(255, 255, 255, 0.9);
+}
+
 .close-btn {
   display: flex;
   align-items: center;
@@ -183,15 +311,24 @@ import { nextTick } from 'vue'
     color 0.15s;
   flex-shrink: 0;
 }
-
 .close-btn:hover {
   background: rgba(220, 50, 40, 0.7);
   border-color: transparent;
   color: white;
 }
 
+/* ─── Video area with side nav ────────────────────────────────────────────── */
+.modal-video-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .modal-video-wrap {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -209,7 +346,33 @@ import { nextTick } from 'vue'
   display: block;
 }
 
-/* Transition */
+/* ─── Nav buttons ─────────────────────────────────────────────────────────── */
+.nav-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 50%;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.65);
+  transition:
+    background 0.15s,
+    color 0.15s,
+    transform 0.1s;
+}
+.nav-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: white;
+}
+.nav-btn:active {
+  transform: scale(0.93);
+}
+
+/* Transitions */
 .modal-enter-active {
   transition: opacity 0.22s ease;
 }
@@ -255,6 +418,10 @@ import { nextTick } from 'vue'
   }
   .modal-video {
     max-height: calc(95vh - 70px);
+  }
+  .nav-btn {
+    width: 32px;
+    height: 32px;
   }
 }
 </style>

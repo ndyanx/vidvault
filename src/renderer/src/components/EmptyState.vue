@@ -1,12 +1,21 @@
 <script setup>
+// EmptyState.vue
+// Folder thumbnails are no longer stored in localStorage.
+// The main process derives thumb paths deterministically from filePath,
+// so we can't reconstruct them here without an IPC call.
+// Instead we show a clean folder-icon placeholder for all recent entries.
+// If you want previews back, the right approach would be a new IPC handler
+// `store:getFolderThumb(path)` that checks the bucketed thumbnail dir.
+
 import { useVideoLibrary } from '../composables/useVideoLibrary.js'
-const { openFolderDialog } = useVideoLibrary()
+
+const { openFolderDialog, folderHistory, loadFolder, deleteFromHistory } = useVideoLibrary()
 </script>
 
 <template>
   <div class="empty-root">
     <div class="empty-card">
-      <!-- Grid decoration -->
+      <!-- Deco grid -->
       <div class="deco-grid" aria-hidden="true">
         <div v-for="i in 9" :key="i" class="deco-cell" :style="{ animationDelay: `${i * 0.08}s` }">
           <div class="deco-inner" />
@@ -44,6 +53,58 @@ const { openFolderDialog } = useVideoLibrary()
         <p class="empty-hint">mp4 · mov · mkv · avi · webm y más</p>
       </div>
     </div>
+
+    <!-- Recent folders -->
+    <div v-if="folderHistory.length" class="recents">
+      <div class="recents-header">Recientes</div>
+      <div class="recents-grid">
+        <div
+          v-for="entry in folderHistory"
+          :key="entry.path"
+          class="recent-card"
+          @click="loadFolder(entry.path)"
+        >
+          <div class="recent-thumb">
+            <div class="recent-thumb-placeholder">
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 16 16"
+                fill="currentColor"
+                style="color: var(--text-tertiary)"
+              >
+                <path
+                  d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
+                />
+              </svg>
+            </div>
+          </div>
+
+          <div class="recent-info">
+            <span class="recent-name">{{ entry.name }}</span>
+            <span class="recent-path">{{ entry.path }}</span>
+          </div>
+
+          <button
+            class="recent-remove"
+            @click.stop="deleteFromHistory(entry.path)"
+            title="Eliminar del historial"
+          >
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+            >
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -51,11 +112,15 @@ const { openFolderDialog } = useVideoLibrary()
 .empty-root {
   height: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 40px;
+  padding: 32px 40px;
+  gap: 28px;
+  overflow-y: auto;
 }
 
+/* ─── Main card ───────────────────────────────────────────────────────────── */
 .empty-card {
   position: relative;
   width: 100%;
@@ -65,9 +130,9 @@ const { openFolderDialog } = useVideoLibrary()
   border-radius: var(--radius-xl);
   overflow: hidden;
   box-shadow: var(--shadow-md);
+  flex-shrink: 0;
 }
 
-/* 3×3 animated grid decoration at top */
 .deco-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -76,29 +141,24 @@ const { openFolderDialog } = useVideoLibrary()
   height: 160px;
   background: var(--border-subtle);
 }
-
 .deco-cell {
   background: var(--bg-elevated);
   border-radius: 4px;
   overflow: hidden;
   animation: pulse-cell 3s ease-in-out infinite;
 }
-
 .deco-inner {
   width: 100%;
   height: 100%;
   background: linear-gradient(135deg, var(--bg-app) 0%, var(--bg-elevated) 100%);
 }
-
-.deco-cell:nth-child(2) .deco-inner {
+.deco-cell:nth-child(2) .deco-inner,
+.deco-cell:nth-child(5) .deco-inner,
+.deco-cell:nth-child(8) .deco-inner {
   background: linear-gradient(135deg, var(--accent-subtle) 0%, var(--bg-elevated) 100%);
 }
 .deco-cell:nth-child(5) .deco-inner {
-  background: linear-gradient(135deg, var(--accent-subtle) 0%, var(--bg-elevated) 100%);
   opacity: 0.6;
-}
-.deco-cell:nth-child(8) .deco-inner {
-  background: linear-gradient(135deg, var(--accent-subtle) 0%, var(--bg-elevated) 100%);
 }
 
 @keyframes pulse-cell {
@@ -119,19 +179,16 @@ const { openFolderDialog } = useVideoLibrary()
   text-align: center;
   gap: 10px;
 }
-
 .empty-icon-wrap {
   color: var(--accent);
   margin-bottom: 4px;
 }
-
 .empty-title {
   font-family: var(--font-display);
   font-size: 22px;
   font-weight: 700;
   color: var(--text-primary);
 }
-
 .empty-desc {
   font-size: 13.5px;
   color: var(--text-secondary);
@@ -157,11 +214,9 @@ const { openFolderDialog } = useVideoLibrary()
     background 0.15s,
     transform 0.1s;
 }
-
 .open-btn:hover {
   background: var(--accent-hover);
 }
-
 .open-btn:active {
   transform: scale(0.97);
 }
@@ -171,5 +226,117 @@ const { openFolderDialog } = useVideoLibrary()
   font-size: 10.5px;
   color: var(--text-tertiary);
   letter-spacing: 0.05em;
+}
+
+/* ─── Recents ─────────────────────────────────────────────────────────────── */
+.recents {
+  width: 100%;
+  max-width: 560px;
+}
+
+.recents-header {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: 8px;
+  padding-left: 2px;
+}
+
+.recents-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.recent-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+  position: relative;
+}
+.recent-card:hover {
+  background: var(--bg-elevated);
+  border-color: var(--border-medium);
+}
+.recent-card:hover .recent-remove {
+  opacity: 1;
+}
+
+.recent-thumb {
+  width: 48px;
+  height: 32px;
+  border-radius: 5px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-subtle);
+}
+.recent-thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.recent-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.recent-name {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-path {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recent-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  opacity: 0;
+  flex-shrink: 0;
+  transition:
+    opacity 0.15s,
+    background 0.15s,
+    color 0.15s;
+}
+.recent-remove:hover {
+  background: rgba(220, 50, 40, 0.12);
+  color: #dc3228;
 }
 </style>

@@ -1,51 +1,15 @@
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed } from 'vue'
 
-const STORAGE_KEY = 'vidvault-last-folder'
-const HISTORY_KEY = 'vidvault-folder-history'
 const MAX_HISTORY = 8
 
-// ─── State (singleton) ────────────────────────────────────────────────────
 const videos = ref([])
 const currentFolder = ref(null)
 const isLoading = ref(false)
-const error = ref(null) // null | { type: 'not_found' | 'read_error', folder: string }
+const error = ref(null)
+const folderHistory = ref([])
 
-// ─── History ───────────────────────────────────────────────────────────────
-function loadHistory() {
-  try {
-    return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]')
-  } catch {
-    return []
-  }
-}
-
-function saveHistory(history) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history))
-}
-
-function pushToHistory(folderPath) {
-  let history = loadHistory()
-  history = history.filter((h) => h.path !== folderPath)
-  history.unshift({
-    path: folderPath,
-    name: folderPath.replace(/\\/g, '/').split('/').filter(Boolean).pop(),
-    lastOpened: Date.now()
-  })
-  history = history.slice(0, MAX_HISTORY)
-  saveHistory(history)
-  return history
-}
-
-function removeFromHistory(folderPath) {
-  const history = loadHistory().filter((h) => h.path !== folderPath)
-  saveHistory(history)
-  return history
-}
-
-const folderHistory = ref(loadHistory())
-
-// ─── Helpers ───────────────────────────────────────────────────────────────
 const isElectron = typeof window !== 'undefined' && typeof window.electronAPI !== 'undefined'
+const store = isElectron ? window.electronAPI.store : null
 
 function formatSize(bytes) {
   if (!bytes) return '—'
@@ -54,32 +18,43 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
-// ─── Thumbnail IPC listener (singleton) ───────────────────────────────────
-// Subscribes once and patches videos as thumbnails arrive from main process.
+function folderNameFrom(folderPath) {
+  return folderPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || folderPath
+}
+
+function pushToHistory(history, folderPath) {
+  const filtered = history.filter((h) => h.path !== folderPath)
+  filtered.unshift({ path: folderPath, name: folderNameFrom(folderPath), lastOpened: Date.now() })
+  return filtered.slice(0, MAX_HISTORY)
+}
+
+function removeFromHistory(history, folderPath) {
+  return history.filter((h) => h.path !== folderPath)
+}
+
+// Deep-clone via JSON to strip any Vue proxy wrappers before sending over IPC.
+// Electron's contextBridge uses structured clone, which chokes on Proxy objects.
+function toPlain(val) {
+  return JSON.parse(JSON.stringify(val))
+}
+
 let unsubscribeThumbnail = null
 
 function ensureThumbnailListener() {
   if (unsubscribeThumbnail || !isElectron) return
-
   unsubscribeThumbnail = window.electronAPI.onThumbnailReady(({ id, thumbnailUrl }) => {
     const video = videos.value.find((v) => v.id === id)
-    if (video) {
-      video.thumbnailUrl = thumbnailUrl
-    }
+    if (video) video.thumbnailUrl = thumbnailUrl
   })
 }
 
-// ─── Composable ───────────────────────────────────────────────────────────
 export function useVideoLibrary() {
   const isEmpty = computed(() => videos.value.length === 0)
 
   const folderName = computed(() => {
-    if (!currentFolder.value) return null
-    const parts = currentFolder.value.replace(/\\/g, '/').split('/').filter(Boolean)
-    return parts[parts.length - 1] || currentFolder.value
+    return currentFolder.value ? folderNameFrom(currentFolder.value) : null
   })
 
-  // ── Load a folder ─────────────────────────────────────────────────────
   async function loadFolder(folderPath) {
     if (!folderPath || !isElectron) return
 
@@ -88,7 +63,6 @@ export function useVideoLibrary() {
     videos.value = []
     currentFolder.value = folderPath
 
-    // Ensure thumbnail push listener is active before the call
     ensureThumbnailListener()
 
     try {
@@ -97,19 +71,21 @@ export function useVideoLibrary() {
       if (result?.error === 'not_found') {
         error.value = { type: 'not_found', folder: folderPath }
         currentFolder.value = null
-        localStorage.removeItem(STORAGE_KEY)
-        folderHistory.value = removeFromHistory(folderPath)
+        const next = removeFromHistory(folderHistory.value, folderPath)
+        folderHistory.value = next
+        store.set('folderHistory', toPlain(next)).catch(console.error)
+        store.set('lastFolder', null).catch(console.error)
         return
       }
 
-      videos.value = result.map((v) => ({
-        ...v,
-        sizeFormatted: formatSize(v.size)
-        // thumbnailUrl is already set for cached videos, null for new ones
-      }))
+      error.value = null
+      videos.value = result.map((v) => ({ ...v, sizeFormatted: formatSize(v.size) }))
 
-      localStorage.setItem(STORAGE_KEY, folderPath)
-      folderHistory.value = pushToHistory(folderPath)
+      const next = pushToHistory(folderHistory.value, folderPath)
+      folderHistory.value = next
+      // toPlain() strips Vue proxy wrappers — required for IPC structured clone
+      store.set('lastFolder', String(folderPath)).catch(console.error)
+      store.set('folderHistory', toPlain(next)).catch(console.error)
     } catch (err) {
       error.value = { type: 'read_error', folder: folderPath }
       currentFolder.value = null
@@ -119,33 +95,34 @@ export function useVideoLibrary() {
     }
   }
 
-  // ── Open folder dialog ────────────────────────────────────────────────
   async function openFolderDialog() {
     if (!isElectron) return
     const folderPath = await window.electronAPI.openFolder()
     if (folderPath) await loadFolder(folderPath)
   }
 
-  // ── Close current folder → back to empty state ────────────────────────
-  function closeFolder() {
+  async function closeFolder() {
     videos.value = []
     currentFolder.value = null
     error.value = null
-    localStorage.removeItem(STORAGE_KEY)
+    store.set('lastFolder', null).catch(console.error)
   }
 
-  // ── Remove entry from history ─────────────────────────────────────────
-  function deleteFromHistory(folderPath) {
-    folderHistory.value = removeFromHistory(folderPath)
-    if (currentFolder.value === folderPath) closeFolder()
+  async function deleteFromHistory(folderPath) {
+    const next = removeFromHistory(folderHistory.value, folderPath)
+    folderHistory.value = next
+    store.set('folderHistory', toPlain(next)).catch(console.error)
+    if (currentFolder.value === folderPath) {
+      videos.value = []
+      currentFolder.value = null
+      store.set('lastFolder', null).catch(console.error)
+    }
   }
 
-  // ── Dismiss error ─────────────────────────────────────────────────────
   function dismissError() {
     error.value = null
   }
 
-  // ── Update video dimensions (fallback from renderer if needed) ─────────
   function updateVideoDimensions(id, width, height) {
     const video = videos.value.find((v) => v.id === id)
     if (video) {
@@ -154,11 +131,12 @@ export function useVideoLibrary() {
     }
   }
 
-  // ── Init: restore last folder on startup ──────────────────────────────
   async function init() {
-    const lastFolder = localStorage.getItem(STORAGE_KEY)
-    if (lastFolder && isElectron) {
-      await loadFolder(lastFolder)
+    if (!isElectron) return
+    const state = await store.getAll()
+    folderHistory.value = state.folderHistory || []
+    if (state.lastFolder) {
+      await loadFolder(state.lastFolder)
     }
   }
 

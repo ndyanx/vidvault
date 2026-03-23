@@ -2,6 +2,7 @@
 import { onMounted } from 'vue'
 import { useTheme } from './composables/useTheme.js'
 import { useVideoLibrary } from './composables/useVideoLibrary.js'
+import { initFavorites } from './composables/useFavorites.js'
 import TitleBar from './components/TitleBar.vue'
 import GalleryPanel from './components/GalleryPanel.vue'
 import EmptyState from './components/EmptyState.vue'
@@ -9,7 +10,12 @@ import EmptyState from './components/EmptyState.vue'
 const { isDark, toggle } = useTheme()
 const { init, isEmpty, isLoading, error, dismissError, openFolderDialog } = useVideoLibrary()
 
-onMounted(() => init())
+onMounted(async () => {
+  // Initialize favorites from userData before loading the folder,
+  // so the gallery renders correct starred state on first paint.
+  await initFavorites()
+  await init()
+})
 </script>
 
 <template>
@@ -35,7 +41,7 @@ onMounted(() => init())
           La carpeta <strong>{{ error.folder }}</strong> ya no existe o fue movida. Se eliminó del
           historial.
         </span>
-        <span v-else> No se pudo leer la carpeta. Verifica los permisos. </span>
+        <span v-else>No se pudo leer la carpeta. Verifica los permisos.</span>
         <div class="banner-actions">
           <button class="banner-btn accent" @click="openFolderDialog">Abrir otra</button>
           <button class="banner-btn" @click="dismissError">Cerrar</button>
@@ -84,7 +90,6 @@ onMounted(() => init())
   color: #dc3228;
   flex-shrink: 0;
 }
-
 .error-banner span {
   flex: 1;
   line-height: 1.4;
@@ -112,11 +117,9 @@ onMounted(() => init())
   cursor: pointer;
   transition: background 0.15s;
 }
-
 .banner-btn:hover {
   background: var(--bg-app);
 }
-
 .banner-btn.accent {
   background: #dc3228;
   border-color: #dc3228;
