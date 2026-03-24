@@ -13,6 +13,7 @@ const { isFavorite, toggle: toggleFavorite } = useFavorites()
 const GAP = 10
 const VIEWPORT_MARGIN = 400 // px of extra rendering margin (virtual scroll)
 const PROCESS_LOOKAHEAD = 800 // px below viewport to pre-process (1 extra screen approx)
+const IDLE_DELAY = 20_000 // ms of inactivity before background idle processing kicks in
 const DEFAULT_RATIO = 9 / 16
 
 // ─── Search / filter / sort ────────────────────────────────────────────────
@@ -96,23 +97,73 @@ const visibleItems = computed(() => {
 
 const handleScroll = (e) => {
   scrollTop.value = e.target.scrollTop
+  scheduleProcess(true) // scroll is user-driven — process immediately
 }
 
 // ─── On-demand processing ──────────────────────────────────────────────────
-// Items inside viewport + PROCESS_LOOKAHEAD that still need ffprobe/ffmpeg.
-// We debounce so rapid scrolling doesn't spam IPC on every pixel.
+// Three priority tiers, all funneled through the same OnDemandProcessor:
+//   1. visible   — inside viewport (immediate on scroll/thumb arrive)
+//   2. lookahead — PROCESS_LOOKAHEAD px below viewport (same call)
+//   3. idle      — everything else, enqueued only after IDLE_DELAY ms of
+//                  inactivity. The processor always services visible/lookahead
+//                  first; idle paths sit at the back and yield automatically
+//                  when the user scrolls to a new area (reprioritize drops
+//                  them if they haven't started yet).
 let processTimer = null
-function scheduleProcess() {
+let idleTimer = null
+
+function needsWork(item) {
+  return !item.video.thumbnailUrl || !item.video.width || !item.video.duration
+}
+
+function runProcess() {
+  const top = scrollTop.value
+  const bottom = top + viewportHeight.value
+
+  const visible = []
+  const lookahead = []
+
+  for (const item of layoutItems.value) {
+    if (!needsWork(item)) continue
+    const inViewport = item.y + item.height > top && item.y < bottom
+    const inLookahead = item.y + item.height > top - 200 && item.y < bottom + PROCESS_LOOKAHEAD
+    if (inViewport) visible.push(item.video.filePath)
+    else if (inLookahead) lookahead.push(item.video.filePath)
+  }
+
+  const batch = [...visible, ...lookahead]
+  if (batch.length) processVisible(batch)
+}
+
+function runIdle() {
+  // Collect everything not yet done, skipping viewport+lookahead (already
+  // handled by runProcess) so we don't duplicate — the processor dedupes
+  // in-flight paths, but no need to add noise.
+  const top = scrollTop.value
+  const bottom = top + viewportHeight.value
+
+  const idlePaths = []
+  for (const item of layoutItems.value) {
+    if (!needsWork(item)) continue
+    const inActive = item.y + item.height > top - 200 && item.y < bottom + PROCESS_LOOKAHEAD
+    if (!inActive) idlePaths.push(item.video.filePath)
+  }
+
+  if (idlePaths.length) processVisible(idlePaths)
+}
+
+function scheduleProcess(immediate = false) {
   clearTimeout(processTimer)
-  processTimer = setTimeout(() => {
-    const top = scrollTop.value
-    const bottom = top + viewportHeight.value + PROCESS_LOOKAHEAD
-    const needsWork = layoutItems.value
-      .filter((item) => item.y + item.height > top && item.y < bottom)
-      .filter((item) => !item.video.thumbnailUrl || !item.video.width)
-      .map((item) => item.video.filePath)
-    if (needsWork.length) processVisible(needsWork)
-  }, 150)
+  // Reset idle timer on every user-driven activity so idle never fires
+  // while the user is actively scrolling or thumbnails are still arriving.
+  clearTimeout(idleTimer)
+  idleTimer = setTimeout(runIdle, IDLE_DELAY)
+
+  if (immediate) {
+    runProcess()
+  } else {
+    processTimer = setTimeout(runProcess, 150)
+  }
 }
 
 // ─── Sticky scroll ─────────────────────────────────────────────────────────
@@ -136,7 +187,7 @@ watch(
   () => {
     nextTick(() => {
       restoreScroll()
-      scheduleProcess()
+      scheduleProcess(true) // immediate — a new item entered viewport or a thumb arrived
     })
   },
   { flush: 'post' }
@@ -168,7 +219,7 @@ watch(
   () =>
     nextTick(() => {
       updateLayout()
-      scheduleProcess()
+      scheduleProcess(false) // layout just rebuilt — debounce ok here
     }),
   { flush: 'post' }
 )
@@ -256,9 +307,15 @@ function onGalleryDragLeave(e) {
 async function onGalleryDrop(e) {
   e.preventDefault()
   isDraggingFolder.value = false
-  const file = e.dataTransfer.files[0]
-  if (!file?.path) return
-  await loadFolder(file.path)
+
+  // File.path no existe en el renderer con contextIsolation:true.
+  // getDroppedFolderPath() corre en el preload (contexto Node) donde
+  // webUtils.getPathForFile() sí tiene acceso al path real del filesystem.
+  const file = e.dataTransfer.files[0] ?? e.dataTransfer.items?.[0]?.getAsFile()
+  if (!file) return
+  const folderPath = window.electronAPI.getDroppedFolderPath(file)
+  if (!folderPath) return
+  await loadFolder(folderPath)
 }
 
 // ─── Lifecycle ─────────────────────────────────────────────────────────────
@@ -272,6 +329,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   resizeObserver?.disconnect()
+  clearTimeout(idleTimer)
   document.removeEventListener('keydown', handleKey)
   document.removeEventListener('mousedown', handleGlobalMousedown)
 })

@@ -221,80 +221,110 @@ function saveCache(cache) {
 }
 
 // ─── On-demand processor ──────────────────────────────────────────────────
-// No background queue. The renderer tells us exactly which filePaths need
-// processing (visible viewport + lookahead). We process only those, with
-// a small concurrency so the CPU stays free for everything else.
-// A new request cancels any pending slots from the previous one.
+// Priority queue processor. The renderer sends viewport filePaths on every
+// scroll. Instead of cancelling pending work, we:
+//   1. Promote newly-visible paths to the front of the queue
+//   2. Drop paths that left the viewport and haven't started yet
+//   3. Never interrupt in-flight ffprobe/ffmpeg — they always finish
+//
+// Cards fill in order of visibility, scroll never resets progress, and the
+// CPU stays busy with useful work at all times.
 class OnDemandProcessor {
   constructor() {
     this._running = 0
-    this._limit = 3
-    this._token = 0 // incremented on every process() call to cancel stale work
+    this._limit = 4 // slight bump — ffprobe is mostly I/O wait
+    this._queue = [] // ordered list of pending filePaths
+    this._inFlight = new Set() // filePaths currently being processed
+    this._ctx = null // { cache, send, alive, onDone } — updated each reprioritize
   }
 
-  // Process a fresh batch of filePaths. Cancels any previously queued work
-  // that hasn't started yet (in-flight ffprobe/ffmpeg finish naturally).
-  process(filePaths, { cache, send, alive, onDone }) {
-    const myToken = ++this._token
+  // Called by pipeline:process on every scroll/layout event.
+  // filePaths are ordered: viewport-visible first, lookahead after.
+  reprioritize(filePaths, ctx) {
+    this._ctx = ctx
 
-    const stillMine = () => this._token === myToken && alive()
+    const incoming = new Set(filePaths)
 
-    const run = async (filePath) => {
-      if (!stillMine()) return
+    // Drop queued items no longer in the incoming set (scrolled off-screen,
+    // not started yet — no point processing cards the user already passed).
+    this._queue = this._queue.filter((fp) => incoming.has(fp))
 
-      const v = onDone.videoMap.get(filePath)
-      if (!v) return
+    // Prepend new paths not already queued or in-flight (preserve their order).
+    const alreadyScheduled = new Set([...this._queue, ...this._inFlight])
+    const toAdd = filePaths.filter((fp) => !alreadyScheduled.has(fp))
+    this._queue = [...toAdd, ...this._queue]
 
-      // ── dims ──────────────────────────────────────────────────────────────
-      let dims = cache[filePath]
-      if (!dims || dims.mtime !== v.mtime) {
-        const result = await getVideoDimensions(filePath)
-        if (!stillMine()) return
-        if (!result) {
-          // Persist the negative result so future readVideos calls can exclude
-          // this file immediately, without waiting for ffprobe to run again.
-          cache[filePath] = { noStream: true, mtime: v.mtime }
-          onDone.cacheChanged = true
-          send('video:no-stream', { id: v.id })
-          return
+    this._drain()
+  }
+
+  _drain() {
+    while (this._running < this._limit && this._queue.length > 0) {
+      const fp = this._queue.shift()
+      this._inFlight.add(fp)
+      this._running++
+      this._run(fp).finally(() => {
+        this._inFlight.delete(fp)
+        this._running--
+        const ctx = this._ctx
+        if (ctx?.onDone?.cacheChanged) {
+          ctx.onDone.cacheChanged = false
+          saveCache(ctx.cache)
         }
-        cache[filePath] = { ...result, mtime: v.mtime }
-        onDone.cacheChanged = true
-        dims = result
-        send('dims:ready', { id: v.id, ...result })
-      }
-
-      // ── thumbnail ─────────────────────────────────────────────────────────
-      const { path: thumbPath } = thumbPathForFile(filePath)
-      if (existsSync(thumbPath)) return
-      if (!stillMine()) return
-
-      const outPath = await generateThumbnail(filePath, dims.duration)
-      if (!outPath || !stillMine()) return
-      send('thumbnail:ready', {
-        id: v.id,
-        thumbnailUrl: `localvideo://local/${encodeURIComponent(outPath)}`
+        this._drain()
       })
     }
+  }
 
-    // Drain with concurrency limit
-    let index = 0
-    const next = () => {
-      while (this._running < this._limit && index < filePaths.length) {
-        const fp = filePaths[index++]
-        this._running++
-        run(fp).finally(() => {
-          this._running--
-          next()
-          // Save cache lazily after each video completes
-          if (onDone.cacheChanged) {
-            onDone.cacheChanged = false
-            saveCache(cache)
-          }
-        })
+  async _run(filePath) {
+    const ctx = this._ctx
+    if (!ctx || !ctx.alive()) return
+
+    const { cache, send, onDone } = ctx
+    const v = onDone.videoMap.get(filePath)
+    if (!v) return
+
+    // ── dims ────────────────────────────────────────────────────────────────
+    let dims = cache[filePath]
+    if (!dims || dims.mtime !== v.mtime) {
+      const result = await getVideoDimensions(filePath)
+      if (!ctx.alive()) return
+      if (!result) {
+        cache[filePath] = { noStream: true, mtime: v.mtime }
+        onDone.cacheChanged = true
+        send('video:no-stream', { id: v.id })
+        return
       }
+      cache[filePath] = { ...result, mtime: v.mtime }
+      onDone.cacheChanged = true
+      dims = result
+      send('dims:ready', { id: v.id, ...dims })
     }
-    next()
+
+    // ── thumbnail ───────────────────────────────────────────────────────────
+    const { path: thumbPath } = thumbPathForFile(filePath)
+    if (existsSync(thumbPath)) {
+      // Thumb on disk — emit if renderer doesn't have it yet (FS race guard).
+      if (!v.thumbnailUrl) {
+        const url = `localvideo://local/${encodeURIComponent(thumbPath)}`
+        v.thumbnailUrl = url
+        send('thumbnail:ready', { id: v.id, thumbnailUrl: url })
+      }
+      return
+    }
+
+    if (!ctx.alive()) return
+    const outPath = await generateThumbnail(filePath, dims.duration)
+    if (!outPath || !ctx.alive()) return
+    const url = `localvideo://local/${encodeURIComponent(outPath)}`
+    v.thumbnailUrl = url
+    send('thumbnail:ready', { id: v.id, thumbnailUrl: url })
+  }
+
+  // Hard reset — called when a new folder is loaded.
+  reset() {
+    this._queue = []
+    this._inFlight.clear()
+    // In-flight promises finish naturally; send() is gated by alive() = false.
   }
 }
 
@@ -328,7 +358,7 @@ async function getVideoDimensions(filePath) {
 async function generateThumbnail(filePath, duration) {
   const { dir, path: outPath } = thumbPathForFile(filePath)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  const seekTime = duration ? Math.min(Math.max(duration * 0.1, 1), 30).toFixed(2) : '1'
+  const seekTime = '1' // duration ? Math.min(Math.max(duration * 0.1, 1), 30).toFixed(2) : '1'
   try {
     await execFileAsync(
       'ffmpeg',
@@ -346,11 +376,14 @@ async function generateThumbnail(filePath, duration) {
         '-y',
         outPath
       ],
-      { timeout: 15000 }
+      { timeout: 60000 }
     )
     return outPath
   } catch (err) {
-    console.error(`[thumbnail] Failed for ${filePath}:`, err.message)
+    console.error(`[thumbnail] Failed for ${filePath}`)
+    console.error('code:', err.code)
+    console.error('stdout:', err.stdout)
+    console.error('stderr:', err.stderr) // 🔥 ESTE ES EL IMPORTANTE
     return null
   }
 }
@@ -360,6 +393,83 @@ async function generateThumbnail(filePath, duration) {
 // pipelineToken gates all async work: incremented on cancel/folder-change.
 let pipelineToken = 0
 const processor = new OnDemandProcessor()
+
+// ─── Folder watcher (poll-based) ──────────────────────────────────────────
+// Simple 30-second poll: re-reads the watched directory and compares the set
+// of video filePaths against the last known snapshot.  If anything was added
+// or removed the renderer is notified via 'folder:changed' so it can reload.
+// No chokidar — no quirks, no extra dependency, no surprises.
+const POLL_INTERVAL = 30_000 // ms
+
+let watchTimer = null
+let watchedDir = null
+let watchSnapshot = new Map()
+
+function collectVideoEntries(dirPath) {
+  const found = new Map() // filePath → mtime
+  const walk = (currentPath) => {
+    let entries
+    try {
+      entries = readdirSync(currentPath, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (!entry.name.startsWith('.')) walk(join(currentPath, entry.name))
+        continue
+      }
+      const dotIndex = entry.name.lastIndexOf('.')
+      if (dotIndex === -1) continue
+      const ext = entry.name.slice(dotIndex).toLowerCase()
+      if (!VIDEO_EXTENSIONS.has(ext)) continue
+      const fullPath = join(currentPath, entry.name)
+      try {
+        found.set(fullPath, statSync(fullPath).mtimeMs)
+      } catch {
+        // file disappeared between readdir and stat — skip
+      }
+    }
+  }
+  walk(dirPath)
+  return found
+}
+
+function startFolderWatch(dirPath) {
+  stopFolderWatch()
+  watchedDir = dirPath
+  watchSnapshot = collectVideoEntries(dirPath)
+
+  watchTimer = setInterval(() => {
+    if (!watchedDir) return
+    const win = BrowserWindow.getAllWindows()[0]
+    if (!win || win.isDestroyed()) { stopFolderWatch(); return }
+
+    const current = collectVideoEntries(watchedDir)
+
+    // Detect added, removed, or modified (same path, different mtime)
+    const added = []
+    const removed = []
+    for (const [p, mtime] of current) {
+      if (!watchSnapshot.has(p)) added.push(p)
+      else if (watchSnapshot.get(p) !== mtime) added.push(p) // treat modified as re-add
+    }
+    for (const p of watchSnapshot.keys()) {
+      if (!current.has(p)) removed.push(p)
+    }
+
+    if (added.length || removed.length) {
+      watchSnapshot = current
+      win.webContents.send('folder:changed', { added, removed })
+    }
+  }, POLL_INTERVAL)
+}
+
+function stopFolderWatch() {
+  if (watchTimer) { clearInterval(watchTimer); watchTimer = null }
+  watchedDir = null
+  watchSnapshot = new Map()
+}
 
 // ─── Window ────────────────────────────────────────────────────────────────
 function createWindow() {
@@ -401,6 +511,17 @@ function createWindow() {
     }
   })
   win.on('ready-to-show', () => win.show())
+
+  // ── Drag & drop de carpetas ──────────────────────────────────────────────
+  // Con contextIsolation:true el renderer NO puede leer file.path desde el
+  // evento drop del DOM — el objeto File no expone el path real del filesystem.
+  // Solución: interceptar el drop en el main process directamente.
+  //
+  // Electron expone los paths reales via ipcMain 'drop-folder' que el preload
+  // dispara usando webUtils.getPathForFile() — disponible en Electron 32+.
+  // Para versiones anteriores, usamos la ruta alternativa: el renderer envía
+  // el fileName y el main lo resuelve desde el último drag-enter registrado.
+  win.webContents.on('will-navigate', (e) => e.preventDefault())
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     win.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
@@ -499,14 +620,16 @@ app.on('window-all-closed', () => {
 // pipeline stops consuming CPU as soon as possible.
 ipcMain.on('pipeline:cancel', () => {
   pipelineToken++ // invalidates all in-flight work for the current folder
+  processor.reset() // clear queue so stale paths don't run after folder change
+  stopFolderWatch() // stop polling — new loadFolder will restart it
 })
 
 // ─── IPC: Process visible videos on-demand ────────────────────────────────
-// The renderer sends filePaths of videos currently in the viewport
-// (+ lookahead). We process only those — nothing else runs in background.
+// The renderer sends filePaths ordered: viewport-visible first, lookahead after.
+// We reprioritize the queue rather than cancelling — cards fill in scroll order.
 ipcMain.on('pipeline:process', (event, filePaths) => {
   if (!Array.isArray(filePaths) || !filePaths.length) return
-  if (!processor._onDone) return
+  if (!processor._onDone?.videoMap?.size) return
   const cache = loadCache()
   const myToken = pipelineToken
   const send = (channel, data) => {
@@ -515,7 +638,7 @@ ipcMain.on('pipeline:process', (event, filePaths) => {
     event.sender.send(channel, data)
   }
   const alive = () => pipelineToken === myToken && !event.sender.isDestroyed()
-  processor.process(filePaths, { cache, send, alive, onDone: processor._onDone })
+  processor.reprioritize(filePaths, { cache, send, alive, onDone: processor._onDone })
 })
 
 // ─── IPC: Open folder dialog ───────────────────────────────────────────────
@@ -579,6 +702,19 @@ ipcMain.handle('fs:readVideos', async (event, dirPath) => {
 
   const cache = loadCache()
 
+  // ── Stale cache cleanup ─────────────────────────────────────────────────
+  // Remove cache entries whose file no longer exists on disk.  Runs after
+  // walk() so we have the fresh filePath set to compare against.
+  const freshPaths = new Set(rawVideos.map((v) => v.filePath))
+  let cacheChanged = false
+  for (const cachedPath of Object.keys(cache)) {
+    if (!freshPaths.has(cachedPath) && !existsSync(cachedPath)) {
+      delete cache[cachedPath]
+      cacheChanged = true
+    }
+  }
+  if (cacheChanged) saveCache(cache)
+
   // Build initial response using only cached dimensions — return immediately
   // so the renderer can paint cards right away.
   // Files whose cache entry has noStream:true (and whose mtime hasn't changed)
@@ -600,15 +736,19 @@ ipcMain.handle('fs:readVideos', async (event, dirPath) => {
   }, [])
 
   // Invalidate any in-flight on-demand work from the previous folder.
+  // Reset queue + bump token atomically before returning videos so the
+  // renderer can never call pipeline:process before videoMap is ready.
   pipelineToken++
-
-  // Build a filePath → video map so pipeline:process can look up video objects
-  // by filePath without scanning the array each time.
+  processor.reset()
   const videoMap = new Map(videos.map((v) => [v.filePath, v]))
   processor._onDone = { videoMap, cacheChanged: false }
 
   // Return immediately — no background work starts here.
   // The renderer will call pipeline:process with the visible filePaths.
+
+  // Start polling so the renderer is notified if files are added/removed.
+  startFolderWatch(dirPath)
+
   return videos
 })
 

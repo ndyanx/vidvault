@@ -41,10 +41,9 @@ function onDragLeave(e) {
 async function onDrop(e) {
   e.preventDefault()
   isDragging.value = false
-  const file = e.dataTransfer.files[0]
+  const file = e.dataTransfer.files[0] ?? e.dataTransfer.items?.[0]?.getAsFile()
   if (!file) return
-  // In Electron, File objects have a .path property with the real fs path
-  const folderPath = file.path
+  const folderPath = window.electronAPI.getDroppedFolderPath(file)
   if (!folderPath) return
   await loadFolder(folderPath)
 }

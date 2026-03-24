@@ -36,6 +36,7 @@ function toPlain(val) {
 let unsubscribeThumbnail = null
 let unsubscribeDims = null
 let unsubscribeNoStream = null
+let unsubscribeFolderChanged = null
 let initPromise = null
 
 function ensureListeners() {
@@ -56,8 +57,18 @@ function ensureListeners() {
   })
 
   unsubscribeNoStream = window.electronAPI.onVideoNoStream(({ id }) => {
-    // Eliminar de la galeria archivos sin stream de video (ej: audios disfrazados)
     videos.value = videos.value.filter((v) => v.id !== id)
+  })
+}
+
+function ensureFolderWatcher(loadFolder, applyDiff) {
+  if (unsubscribeFolderChanged || !isElectron) return
+  unsubscribeFolderChanged = window.electronAPI.onFolderChanged((diff) => {
+    if (!currentFolder.value) return
+    // If files were removed or modified, do a full reload — layout needs to rebuild
+    if (diff.removed.length) { loadFolder(currentFolder.value); return }
+    // Only additions — append new cards without touching existing ones
+    if (diff.added.length) applyDiff(diff.added)
   })
 }
 
@@ -68,11 +79,21 @@ export function useVideoLibrary() {
     return currentFolder.value ? folderNameFrom(currentFolder.value) : null
   })
 
+  // Append new video cards without resetting existing ones.
+  // Called when the poll detects only additions (no removals/modifications).
+  async function applyDiff(addedPaths) {
+    if (!addedPaths.length) return
+    const result = await window.electronAPI.readVideos(currentFolder.value)
+    if (!result || result.error) return
+    const existingIds = new Set(videos.value.map((v) => v.id))
+    const newVideos = result
+      .filter((v) => addedPaths.includes(v.filePath) && !existingIds.has(v.id))
+      .map((v) => ({ ...v, sizeFormatted: formatSize(v.size) }))
+    if (newVideos.length) videos.value = [...newVideos, ...videos.value]
+  }
+
   async function loadFolder(folderPath) {
     if (!folderPath || !isElectron) return
-
-    // Cancel any in-flight pipeline from a previous folder immediately
-    window.electronAPI.cancelPipeline()
 
     isLoading.value = true
     error.value = null
@@ -80,6 +101,7 @@ export function useVideoLibrary() {
     currentFolder.value = folderPath
 
     ensureListeners()
+    ensureFolderWatcher(loadFolder, applyDiff)
 
     try {
       const result = await window.electronAPI.readVideos(folderPath)

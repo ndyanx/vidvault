@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 contextBridge.exposeInMainWorld('electron', electronAPI)
@@ -30,6 +30,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Cancel all in-flight on-demand work (call before every loadFolder)
   cancelPipeline: () => ipcRenderer.send('pipeline:cancel'),
 
+  // Notified when the watched folder changes (poll ~30s). Payload: { added, removed }
+  onFolderChanged: (callback) => {
+    const handler = (_event, diff) => callback(diff)
+    ipcRenderer.on('folder:changed', handler)
+    return () => ipcRenderer.off('folder:changed', handler)
+  },
+
   // Request processing for a specific set of filePaths (visible + lookahead).
   // Main process runs ffprobe + ffmpeg only for these — nothing else.
   processPipeline: (filePaths) => ipcRenderer.send('pipeline:process', filePaths),
@@ -39,6 +46,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showInFolder: (filePath) => ipcRenderer.invoke('shell:showInFolder', filePath),
 
   copyPath: (filePath) => ipcRenderer.invoke('shell:copyPath', filePath),
+
+  // ── Drag & drop ────────────────────────────────────────────────────────
+  // Con contextIsolation:true, File.path está undefined en el renderer.
+  // webUtils.getPathForFile() es la API oficial de Electron (v32+) para
+  // obtener el path real del filesystem desde un objeto File del DOM.
+  // Para versiones anteriores, File.path aún funciona en el preload context
+  // porque el preload corre en el contexto de Node, no del renderer.
+  getDroppedFolderPath: (file) => {
+    try {
+      if (webUtils && typeof webUtils.getPathForFile === 'function') {
+        return webUtils.getPathForFile(file)
+      }
+    } catch {
+      // webUtils no disponible en esta versión de Electron
+    }
+    return file?.path ?? null
+  },
 
   store: {
     get: (key) => ipcRenderer.invoke('store:get', key),
