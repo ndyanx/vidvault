@@ -4,11 +4,11 @@
 
 /* ─── Theme tokens ───────────────────────────────────────────────────────  */
 :root {
-  /* Light mode */
-  --bg-app: #f0ede8;
-  --bg-surface: #faf9f7;
-  --bg-elevated: #ffffff;
-  --bg-overlay: rgba(240, 237, 232, 0.92);
+  /* Light mode — superficies semitransparentes para dejar ver el acrylic */
+  --bg-app: rgba(240, 237, 232, 0.25);
+  --bg-surface: rgba(250, 249, 247, 0.45);
+  --bg-elevated: rgba(255, 255, 255, 0.60);
+  --bg-overlay: rgba(240, 237, 232, 0.80);
 
   --border-subtle: rgba(0, 0, 0, 0.08);
   --border-medium: rgba(0, 0, 0, 0.14);
@@ -38,10 +38,10 @@
 }
 
 [data-theme='dark'] {
-  --bg-app: #0e0c0b;
-  --bg-surface: #161412;
-  --bg-elevated: #1e1b18;
-  --bg-overlay: rgba(14, 12, 11, 0.92);
+  --bg-app: rgba(14, 12, 11, 0.25);
+  --bg-surface: rgba(22, 20, 18, 0.45);
+  --bg-elevated: rgba(30, 27, 24, 0.60);
+  --bg-overlay: rgba(14, 12, 11, 0.80);
 
   --border-subtle: rgba(255, 255, 255, 0.06);
   --border-medium: rgba(255, 255, 255, 0.1);
@@ -80,7 +80,7 @@ body,
 
 body {
   font-family: var(--font-display);
-  background: var(--bg-app);
+  background: transparent; /* acrylic: no tapar el efecto nativo del DWM */
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;

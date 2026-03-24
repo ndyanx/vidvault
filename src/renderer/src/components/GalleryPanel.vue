@@ -6,12 +6,13 @@ import { formatDuration } from '../utils/format.js'
 import VideoSkeleton from './VideoSkeleton.vue'
 import VideoModal from './VideoModal.vue'
 
-const { videos, isLoading } = useVideoLibrary()
+const { videos, isLoading, processVisible, loadFolder } = useVideoLibrary()
 const { isFavorite, toggle: toggleFavorite } = useFavorites()
 
 // ─── Constants ────────────────────────────────────────────────────────────
 const GAP = 10
-const VIEWPORT_MARGIN = 400
+const VIEWPORT_MARGIN = 400 // px of extra rendering margin (virtual scroll)
+const PROCESS_LOOKAHEAD = 800 // px below viewport to pre-process (1 extra screen approx)
 const DEFAULT_RATIO = 9 / 16
 
 // ─── Search / filter / sort ────────────────────────────────────────────────
@@ -97,6 +98,50 @@ const handleScroll = (e) => {
   scrollTop.value = e.target.scrollTop
 }
 
+// ─── On-demand processing ──────────────────────────────────────────────────
+// Items inside viewport + PROCESS_LOOKAHEAD that still need ffprobe/ffmpeg.
+// We debounce so rapid scrolling doesn't spam IPC on every pixel.
+let processTimer = null
+function scheduleProcess() {
+  clearTimeout(processTimer)
+  processTimer = setTimeout(() => {
+    const top = scrollTop.value
+    const bottom = top + viewportHeight.value + PROCESS_LOOKAHEAD
+    const needsWork = layoutItems.value
+      .filter((item) => item.y + item.height > top && item.y < bottom)
+      .filter((item) => !item.video.thumbnailUrl || !item.video.width)
+      .map((item) => item.video.filePath)
+    if (needsWork.length) processVisible(needsWork)
+  }, 150)
+}
+
+// ─── Sticky scroll ─────────────────────────────────────────────────────────
+// When dims arrive and buildLayout() shifts card positions, preserve the
+// user's scroll position so the viewport doesn't jump.
+let savedScrollTop = null
+function saveScroll() {
+  if (rootRef.value) savedScrollTop = rootRef.value.scrollTop
+}
+function restoreScroll() {
+  if (rootRef.value && savedScrollTop !== null) {
+    rootRef.value.scrollTop = savedScrollTop
+    savedScrollTop = null
+  }
+}
+
+// Watch dims/thumb arriving — after layout rebuilds, restore scroll and
+// schedule the next batch of on-demand processing for the new viewport.
+watch(
+  visibleItems,
+  () => {
+    nextTick(() => {
+      restoreScroll()
+      scheduleProcess()
+    })
+  },
+  { flush: 'post' }
+)
+
 const getColsForWidth = (w) => {
   if (w < 480) return 1
   if (w < 720) return 2
@@ -107,6 +152,7 @@ const getColsForWidth = (w) => {
 
 const updateLayout = () => {
   if (!rootRef.value) return
+  saveScroll()
   const w = rootRef.value.clientWidth - 32
   viewportHeight.value = rootRef.value.clientHeight
   const cols = getColsForWidth(w)
@@ -117,7 +163,15 @@ const updateLayout = () => {
 }
 
 let resizeObserver = null
-watch(filteredVideos, () => nextTick(() => updateLayout()), { flush: 'post' })
+watch(
+  filteredVideos,
+  () =>
+    nextTick(() => {
+      updateLayout()
+      scheduleProcess()
+    }),
+  { flush: 'post' }
+)
 
 // ─── Context menu ──────────────────────────────────────────────────────────
 const ctxMenu = ref(null)
@@ -182,13 +236,29 @@ const navigateModal = (dir) => {
 }
 
 const handleKey = (e) => {
-  if (e.key === 'Escape' && ctxMenu.value) {
-    closeContextMenu()
-    return
+  if (e.key === 'Escape' && ctxMenu.value) closeContextMenu()
+}
+
+// ─── Drag & drop ───────────────────────────────────────────────────────────
+const isDraggingFolder = ref(false)
+
+function onGalleryDragOver(e) {
+  e.preventDefault()
+  isDraggingFolder.value = true
+}
+
+function onGalleryDragLeave(e) {
+  if (!e.currentTarget.contains(e.relatedTarget)) {
+    isDraggingFolder.value = false
   }
-  if (!modalVideo.value) return
-  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') navigateModal(1)
-  if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') navigateModal(-1)
+}
+
+async function onGalleryDrop(e) {
+  e.preventDefault()
+  isDraggingFolder.value = false
+  const file = e.dataTransfer.files[0]
+  if (!file?.path) return
+  await loadFolder(file.path)
 }
 
 // ─── Lifecycle ─────────────────────────────────────────────────────────────
@@ -208,7 +278,28 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="gallery-root" ref="rootRef" @scroll="handleScroll">
+  <div
+    class="gallery-root"
+    ref="rootRef"
+    @scroll="handleScroll"
+    :class="{ 'is-dragging': isDraggingFolder }"
+    @dragover="onGalleryDragOver"
+    @dragleave="onGalleryDragLeave"
+    @drop="onGalleryDrop"
+  >
+    <!-- Drop overlay -->
+    <Transition name="drop-overlay">
+      <div v-if="isDraggingFolder" class="drop-overlay" aria-hidden="true">
+        <div class="drop-overlay-inner">
+          <svg width="32" height="32" viewBox="0 0 16 16" fill="currentColor">
+            <path
+              d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
+            />
+          </svg>
+          <span>Suelta para abrir esta carpeta</span>
+        </div>
+      </div>
+    </Transition>
     <!-- ── Toolbar ──────────────────────────────────────────────────────── -->
     <div class="gallery-toolbar" v-if="!isLoading && videos.length">
       <div class="search-wrap">
@@ -301,83 +392,81 @@ onUnmounted(() => {
       class="gallery-canvas"
       :style="{ height: containerHeight + 56 + 'px' }"
     >
-      <div
-        v-for="item in visibleItems"
-        :key="item.id"
-        class="gallery-card"
-        :style="{
-          position: 'absolute',
-          left: item.x + 'px',
-          top: item.y + 'px',
-          width: item.width + 'px',
-          height: item.height + 'px'
-        }"
-        @click="openModal(item.video)"
-        @contextmenu="openContextMenu($event, item.video)"
-      >
-        <Transition name="thumb-fade">
-          <img
-            v-if="item.video.thumbnailUrl"
-            :key="item.video.thumbnailUrl"
-            :src="item.video.thumbnailUrl"
-            class="card-thumb"
-            draggable="false"
-            loading="lazy"
-            decoding="async"
-          />
-          <div v-else class="card-thumb-placeholder">
-            <div class="thumb-shimmer" />
-          </div>
-        </Transition>
-
-        <!-- Favorite button -->
-        <button
-          class="card-fav-btn"
-          :class="{ active: isFavorite(item.video.id) }"
-          @click.stop="toggleFavorite(item.video.id)"
-          title="Favorito"
+      <TransitionGroup name="card-remove">
+        <div
+          v-for="item in visibleItems"
+          :key="item.id"
+          class="gallery-card"
+          :style="{
+            position: 'absolute',
+            left: item.x + 'px',
+            top: item.y + 'px',
+            width: item.width + 'px',
+            height: item.height + 'px'
+          }"
+          @click="openModal(item.video)"
+          @contextmenu="openContextMenu($event, item.video)"
         >
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            :fill="isFavorite(item.video.id) ? 'currentColor' : 'none'"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <polygon
-              points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
+          <Transition name="thumb-fade">
+            <img
+              v-if="item.video.thumbnailUrl"
+              :key="item.video.thumbnailUrl"
+              :src="item.video.thumbnailUrl"
+              class="card-thumb"
+              draggable="false"
+              loading="lazy"
+              decoding="async"
             />
-          </svg>
-        </button>
+            <div v-else class="card-thumb-placeholder">
+              <div class="thumb-shimmer" />
+            </div>
+          </Transition>
 
-        <!-- Duration badge -->
-        <div v-if="formatDuration(item.video.duration)" class="card-duration">
-          {{ formatDuration(item.video.duration) }}
-        </div>
+          <!-- Favorite button -->
+          <button
+            class="card-fav-btn"
+            :class="{ active: isFavorite(item.video.id) }"
+            @click.stop="toggleFavorite(item.video.id)"
+            title="Favorito"
+          >
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              :fill="isFavorite(item.video.id) ? 'currentColor' : 'none'"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <polygon
+                points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
+              />
+            </svg>
+          </button>
 
-        <!-- Hover overlay -->
-        <div class="card-overlay">
-          <span class="card-filename">{{ item.video.fileName }}</span>
-          <div class="card-meta-row">
-            <span class="card-ext">{{ item.video.ext }}</span>
-            <span class="card-size">{{ item.video.sizeFormatted }}</span>
+          <!-- Duration badge -->
+          <div v-if="formatDuration(item.video.duration)" class="card-duration">
+            {{ formatDuration(item.video.duration) }}
+          </div>
+
+          <!-- Hover overlay -->
+          <div class="card-overlay">
+            <span class="card-filename">{{ item.video.fileName }}</span>
+            <div class="card-meta-row">
+              <span class="card-ext">{{ item.video.ext }}</span>
+              <span class="card-size">{{ item.video.sizeFormatted }}</span>
+            </div>
+          </div>
+
+          <!-- Play icon -->
+          <div class="card-play-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
           </div>
         </div>
+      </TransitionGroup>
 
-        <!-- Play icon -->
-        <div class="card-play-icon">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3" />
-          </svg>
-        </div>
-      </div>
-
-      <div
-        class="gallery-footer"
-        :class="{ 'modal-open': !!modalVideo }"
-        :style="{ top: containerHeight + 8 + 'px' }"
-      >
+      <div :class="{ 'modal-open': !!modalVideo }" :style="{ top: containerHeight + 8 + 'px' }">
         {{ filteredVideos.length }} video{{ filteredVideos.length !== 1 ? 's' : '' }}
         <template v-if="filteredVideos.length !== videos.length"> de {{ videos.length }}</template>
       </div>
@@ -480,6 +569,48 @@ onUnmounted(() => {
   padding: 12px 16px 16px;
   position: relative;
   scroll-behavior: smooth;
+  transition: background 0.15s;
+}
+
+.gallery-root.is-dragging {
+  background: var(--accent-subtle);
+}
+
+/* ─── Drop overlay ────────────────────────────────────────────────────────── */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  pointer-events: none;
+}
+
+.drop-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  background: var(--bg-elevated);
+  padding: 28px 40px;
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-modal);
+}
+
+.drop-overlay-enter-active,
+.drop-overlay-leave-active {
+  transition: opacity 0.15s ease;
+}
+.drop-overlay-enter-from,
+.drop-overlay-leave-to {
+  opacity: 0;
 }
 
 /* ─── Toolbar ─────────────────────────────────────────────────────────────── */
@@ -698,6 +829,18 @@ onUnmounted(() => {
 }
 .thumb-fade-enter-from {
   opacity: 0;
+}
+
+/* ─── Card remove transition (no-stream files on first scan) ──────────────── */
+.card-remove-leave-active {
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+  pointer-events: none;
+}
+.card-remove-leave-to {
+  opacity: 0;
+  transform: scale(0.95);
 }
 
 /* ─── Favorite button ─────────────────────────────────────────────────────── */

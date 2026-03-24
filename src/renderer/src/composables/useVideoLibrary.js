@@ -6,6 +6,7 @@ const MAX_HISTORY = 8
 const videos = ref([])
 const currentFolder = ref(null)
 const isLoading = ref(false)
+const isInitializing = ref(true) // true until init() resolves; suppresses EmptyState flash
 const error = ref(null)
 const folderHistory = ref([])
 
@@ -33,12 +34,30 @@ function toPlain(val) {
 }
 
 let unsubscribeThumbnail = null
+let unsubscribeDims = null
+let unsubscribeNoStream = null
+let initPromise = null
 
-function ensureThumbnailListener() {
+function ensureListeners() {
   if (unsubscribeThumbnail || !isElectron) return
+
   unsubscribeThumbnail = window.electronAPI.onThumbnailReady(({ id, thumbnailUrl }) => {
     const video = videos.value.find((v) => v.id === id)
     if (video) video.thumbnailUrl = thumbnailUrl
+  })
+
+  unsubscribeDims = window.electronAPI.onDimsReady(({ id, width, height, duration }) => {
+    const video = videos.value.find((v) => v.id === id)
+    if (video) {
+      video.width = width
+      video.height = height
+      video.duration = duration
+    }
+  })
+
+  unsubscribeNoStream = window.electronAPI.onVideoNoStream(({ id }) => {
+    // Eliminar de la galeria archivos sin stream de video (ej: audios disfrazados)
+    videos.value = videos.value.filter((v) => v.id !== id)
   })
 }
 
@@ -52,12 +71,15 @@ export function useVideoLibrary() {
   async function loadFolder(folderPath) {
     if (!folderPath || !isElectron) return
 
+    // Cancel any in-flight pipeline from a previous folder immediately
+    window.electronAPI.cancelPipeline()
+
     isLoading.value = true
     error.value = null
     videos.value = []
     currentFolder.value = folderPath
 
-    ensureThumbnailListener()
+    ensureListeners()
 
     try {
       const result = await window.electronAPI.readVideos(folderPath)
@@ -77,7 +99,6 @@ export function useVideoLibrary() {
 
       const next = pushToHistory(folderHistory.value, folderPath)
       folderHistory.value = next
-      // toPlain() strips Vue proxy wrappers — required for IPC structured clone
       store.set('lastFolder', String(folderPath)).catch(console.error)
       store.set('folderHistory', toPlain(next)).catch(console.error)
     } catch (err) {
@@ -96,6 +117,7 @@ export function useVideoLibrary() {
   }
 
   async function closeFolder() {
+    window.electronAPI.cancelPipeline()
     videos.value = []
     currentFolder.value = null
     error.value = null
@@ -107,10 +129,18 @@ export function useVideoLibrary() {
     folderHistory.value = next
     store.set('folderHistory', toPlain(next)).catch(console.error)
     if (currentFolder.value === folderPath) {
+      window.electronAPI.cancelPipeline()
       videos.value = []
       currentFolder.value = null
       store.set('lastFolder', null).catch(console.error)
     }
+  }
+
+  // Ask the main process to run ffprobe + ffmpeg for these filePaths.
+  // Called with visible + lookahead filePaths whenever the viewport changes.
+  function processVisible(filePaths) {
+    if (!isElectron || !filePaths || !filePaths.length) return
+    window.electronAPI.processPipeline(filePaths)
   }
 
   function dismissError() {
@@ -118,12 +148,21 @@ export function useVideoLibrary() {
   }
 
   async function init() {
-    if (!isElectron) return
-    const state = await store.getAll()
-    folderHistory.value = state.folderHistory || []
-    if (state.lastFolder) {
-      await loadFolder(state.lastFolder)
+    if (!isElectron) {
+      isInitializing.value = false
+      return
     }
+    if (initPromise) return initPromise
+    initPromise = (async () => {
+      const state = await store.getAll()
+      folderHistory.value = state.folderHistory || []
+      if (state.lastFolder) {
+        await loadFolder(state.lastFolder)
+      }
+    })()
+    await initPromise
+    isInitializing.value = false
+    return initPromise
   }
 
   return {
@@ -132,6 +171,7 @@ export function useVideoLibrary() {
     folderName,
     folderHistory,
     isLoading,
+    isInitializing,
     error,
     isEmpty,
     isElectron,
@@ -140,6 +180,7 @@ export function useVideoLibrary() {
     closeFolder,
     deleteFromHistory,
     dismissError,
+    processVisible,
     init
   }
 }

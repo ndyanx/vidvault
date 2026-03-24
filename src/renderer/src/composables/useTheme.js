@@ -4,7 +4,8 @@ const isElectron = typeof window !== 'undefined' && typeof window.electronAPI !=
 const store = isElectron ? window.electronAPI.store : null
 
 // Detect system preference as default
-const systemDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches
+const systemDark =
+  typeof window !== 'undefined' ? window.matchMedia?.('(prefers-color-scheme: dark)').matches : false
 
 // Start with system preference; will be overwritten once store resolves
 const isDark = ref(systemDark)
@@ -19,7 +20,7 @@ if (isElectron) {
       }
     })
     .catch(() => {})
-} else {
+} else if (typeof window !== 'undefined') {
   // Fallback for browser/dev context
   const saved = localStorage.getItem('vidvault-theme')
   if (saved) isDark.value = saved === 'dark'

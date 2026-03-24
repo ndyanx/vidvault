@@ -8,7 +8,8 @@ import GalleryPanel from './components/GalleryPanel.vue'
 import EmptyState from './components/EmptyState.vue'
 
 const { isDark, toggle } = useTheme()
-const { init, isEmpty, isLoading, error, dismissError, openFolderDialog } = useVideoLibrary()
+const { init, isEmpty, isLoading, isInitializing, error, dismissError, openFolderDialog } =
+  useVideoLibrary()
 
 onMounted(async () => {
   // Initialize favorites from userData before loading the folder,
@@ -50,7 +51,7 @@ onMounted(async () => {
     </Transition>
 
     <main class="app-body">
-      <EmptyState v-if="isEmpty && !isLoading" />
+      <EmptyState v-if="isEmpty && !isLoading && !isInitializing" />
       <GalleryPanel v-else />
     </main>
   </div>
@@ -61,7 +62,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: var(--bg-app);
+  background: transparent; /* acrylic: no tapar el efecto nativo del DWM */
   overflow: hidden;
 }
 

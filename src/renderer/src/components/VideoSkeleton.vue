@@ -1,8 +1,14 @@
 <script setup>
-defineProps({
+const props = defineProps({
   count: { type: Number, default: 12 },
   cols: { type: Number, default: 4 }
 })
+
+function itemsForCol(colIndex) {
+  const base = Math.floor(props.count / props.cols)
+  const extra = colIndex < props.count % props.cols ? 1 : 0
+  return base + extra
+}
 
 // Varied aspect ratios so skeleton feels like real masonry
 const ASPECTS = ['9/16', '4/3', '16/9', '1/1', '9/16', '3/4', '16/9', '4/3']
@@ -13,7 +19,7 @@ const getAspect = (col, row) => ASPECTS[(col * 2 + row) % ASPECTS.length]
   <div class="skeleton-masonry" :style="{ '--cols': cols }">
     <div v-for="col in cols" :key="col" class="skeleton-col">
       <div
-        v-for="i in Math.ceil(count / cols)"
+        v-for="i in itemsForCol(col - 1)"
         :key="i"
         class="skeleton-card"
         :style="{

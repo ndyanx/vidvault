@@ -1,9 +1,11 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useVideoLibrary } from '../composables/useVideoLibrary.js'
 
 const props = defineProps({ isDark: Boolean })
 const emit = defineEmits(['toggle-theme'])
+
+const isMac = window.electronAPI?.platform === 'darwin'
 
 const {
   folderName,
@@ -19,6 +21,25 @@ const {
 
 // ─── History dropdown ──────────────────────────────────────────────────────
 const showHistory = ref(false)
+
+// Folder thumbnails for the history dropdown
+const folderThumbs = ref({})
+
+async function loadThumbs(history) {
+  if (!window.electronAPI?.store?.getFolderThumb) return
+  const results = await Promise.all(
+    history.map(async (entry) => {
+      if (folderThumbs.value[entry.path] !== undefined) return
+      const url = await window.electronAPI.store.getFolderThumb(entry.path)
+      return [entry.path, url ?? null]
+    })
+  )
+  for (const item of results) {
+    if (item) folderThumbs.value[item[0]] = item[1]
+  }
+}
+
+watch(folderHistory, (val) => loadThumbs(val), { immediate: true })
 
 const toggleHistory = () => {
   if (folderHistory.value.length === 0) {
@@ -58,8 +79,9 @@ function relativeTime(ts) {
 </script>
 
 <template>
-  <header class="titlebar">
-    <div class="traffic-lights-spacer" />
+  <header class="titlebar" :class="{ 'is-mac': isMac, 'is-win': !isMac }">
+    <!-- macOS: reserve space for traffic lights on the left -->
+    <div v-if="isMac" class="traffic-lights-spacer" />
 
     <div class="titlebar-brand">
       <span class="brand-icon">▣</span>
@@ -116,17 +138,26 @@ function relativeTime(ts) {
               @click="selectFolder(entry.path)"
             >
               <div class="history-item-left">
-                <svg
-                  width="12"
-                  height="12"
-                  viewBox="0 0 16 16"
-                  fill="currentColor"
-                  class="history-icon"
-                >
-                  <path
-                    d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
+                <div class="history-thumb">
+                  <img
+                    v-if="folderThumbs[entry.path]"
+                    :src="folderThumbs[entry.path]"
+                    class="history-thumb-img"
+                    draggable="false"
                   />
-                </svg>
+                  <svg
+                    v-else
+                    width="12"
+                    height="12"
+                    viewBox="0 0 16 16"
+                    fill="currentColor"
+                    class="history-icon"
+                  >
+                    <path
+                      d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
+                    />
+                  </svg>
+                </div>
                 <div class="history-item-info">
                   <span class="history-name">{{ entry.name }}</span>
                   <span class="history-path">{{ entry.path }}</span>
@@ -249,13 +280,21 @@ function relativeTime(ts) {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 16px 0 0;
-  background: var(--bg-surface);
+  padding: 0 16px; /* default fallback */
+  background: transparent;
   border-bottom: 1px solid var(--border-subtle);
   -webkit-app-region: drag;
   flex-shrink: 0;
   position: relative;
   z-index: 200;
+}
+/* Windows: 148px right padding = space for native WCO controls (3×46px) */
+.titlebar.is-win {
+  padding: 0 148px 0 16px;
+}
+/* macOS: normal padding, traffic-lights-spacer handles left offset */
+.titlebar.is-mac {
+  padding: 0 16px;
 }
 button,
 a,
@@ -431,6 +470,25 @@ input {
 }
 .history-item.active .history-icon {
   color: var(--accent);
+}
+
+.history-thumb {
+  width: 36px;
+  height: 24px;
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.history-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .history-item-info {

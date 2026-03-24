@@ -7,13 +7,22 @@ import {
   createReadStream,
   existsSync,
   readFileSync,
-  writeFileSync,
   mkdirSync,
   renameSync
 } from 'fs'
+import { writeFile } from 'fs/promises'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { createHash } from 'crypto'
+
+// ─── Debounce helper ───────────────────────────────────────────────────────
+function debounce(fn, ms) {
+  let timer = null
+  return (...args) => {
+    clearTimeout(timer)
+    timer = setTimeout(() => fn(...args), ms)
+  }
+}
 
 const execFileAsync = promisify(execFile)
 
@@ -67,13 +76,11 @@ protocol.registerSchemesAsPrivileged([
 // - folderHistory: [{ path, name, lastOpened }]   max 8 entries
 // - favorites:     string[]                        video IDs
 
-const MAX_HISTORY = 8
-
 function getStatePath() {
   return join(app.getPath('userData'), 'app-state.json')
 }
 
-const DEFAULT_STATE = { lastFolder: null, folderHistory: [], favorites: [] }
+const DEFAULT_STATE = { lastFolder: null, folderHistory: [], favorites: [], theme: null }
 
 function loadState() {
   try {
@@ -89,12 +96,16 @@ function loadState() {
   return { ...DEFAULT_STATE }
 }
 
-function saveState(state) {
+const debouncedWriteState = debounce(async (state) => {
   try {
-    writeFileSync(getStatePath(), JSON.stringify(state, null, 2), 'utf-8')
+    await writeFile(getStatePath(), JSON.stringify(state, null, 2), 'utf-8')
   } catch (err) {
     console.error('[state] Failed to save:', err)
   }
+}, 300)
+
+function saveState(state) {
+  debouncedWriteState(state)
 }
 
 // In-memory copy so we don't read from disk on every IPC call
@@ -178,21 +189,112 @@ function migrateFlatThumbnails(cache) {
   if (moved > 0) console.log(`[migrate] Moved ${moved} thumbnails to bucketed layout`)
 }
 
+// In-memory copy so we don't read from disk on every IPC call
+let dimCacheMemory = null
+
 function loadCache() {
+  if (dimCacheMemory) return dimCacheMemory
   try {
     const p = getCachePath()
-    if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf-8'))
+    if (existsSync(p)) {
+      dimCacheMemory = JSON.parse(readFileSync(p, 'utf-8'))
+      return dimCacheMemory
+    }
   } catch {
     /* corrupt — start fresh */
   }
-  return {}
+  dimCacheMemory = {}
+  return dimCacheMemory
 }
 
-function saveCache(cache) {
+const debouncedWriteCache = debounce(async (cache) => {
   try {
-    writeFileSync(getCachePath(), JSON.stringify(cache), 'utf-8')
+    await writeFile(getCachePath(), JSON.stringify(cache), 'utf-8')
   } catch (err) {
     console.error('[cache] Failed to save:', err)
+  }
+}, 300)
+
+function saveCache(cache) {
+  dimCacheMemory = cache // mantener memoria sincronizada
+  debouncedWriteCache(cache)
+}
+
+// ─── On-demand processor ──────────────────────────────────────────────────
+// No background queue. The renderer tells us exactly which filePaths need
+// processing (visible viewport + lookahead). We process only those, with
+// a small concurrency so the CPU stays free for everything else.
+// A new request cancels any pending slots from the previous one.
+class OnDemandProcessor {
+  constructor() {
+    this._running = 0
+    this._limit = 3
+    this._token = 0 // incremented on every process() call to cancel stale work
+  }
+
+  // Process a fresh batch of filePaths. Cancels any previously queued work
+  // that hasn't started yet (in-flight ffprobe/ffmpeg finish naturally).
+  process(filePaths, { cache, send, alive, onDone }) {
+    const myToken = ++this._token
+
+    const stillMine = () => this._token === myToken && alive()
+
+    const run = async (filePath) => {
+      if (!stillMine()) return
+
+      const v = onDone.videoMap.get(filePath)
+      if (!v) return
+
+      // ── dims ──────────────────────────────────────────────────────────────
+      let dims = cache[filePath]
+      if (!dims || dims.mtime !== v.mtime) {
+        const result = await getVideoDimensions(filePath)
+        if (!stillMine()) return
+        if (!result) {
+          // Persist the negative result so future readVideos calls can exclude
+          // this file immediately, without waiting for ffprobe to run again.
+          cache[filePath] = { noStream: true, mtime: v.mtime }
+          onDone.cacheChanged = true
+          send('video:no-stream', { id: v.id })
+          return
+        }
+        cache[filePath] = { ...result, mtime: v.mtime }
+        onDone.cacheChanged = true
+        dims = result
+        send('dims:ready', { id: v.id, ...result })
+      }
+
+      // ── thumbnail ─────────────────────────────────────────────────────────
+      const { path: thumbPath } = thumbPathForFile(filePath)
+      if (existsSync(thumbPath)) return
+      if (!stillMine()) return
+
+      const outPath = await generateThumbnail(filePath, dims.duration)
+      if (!outPath || !stillMine()) return
+      send('thumbnail:ready', {
+        id: v.id,
+        thumbnailUrl: `localvideo://local/${encodeURIComponent(outPath)}`
+      })
+    }
+
+    // Drain with concurrency limit
+    let index = 0
+    const next = () => {
+      while (this._running < this._limit && index < filePaths.length) {
+        const fp = filePaths[index++]
+        this._running++
+        run(fp).finally(() => {
+          this._running--
+          next()
+          // Save cache lazily after each video completes
+          if (onDone.cacheChanged) {
+            onDone.cacheChanged = false
+            saveCache(cache)
+          }
+        })
+      }
+    }
+    next()
   }
 }
 
@@ -253,22 +355,17 @@ async function generateThumbnail(filePath, duration) {
   }
 }
 
-// ─── Concurrency limiter ───────────────────────────────────────────────────
-async function runWithConcurrency(tasks, limit) {
-  const results = new Array(tasks.length)
-  let index = 0
-  const worker = async () => {
-    while (index < tasks.length) {
-      const current = index++
-      results[current] = await tasks[current]()
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker))
-  return results
-}
+// ─── On-demand processor instance ────────────────────────────────────────
+// One global instance — replaced videoMap on every loadFolder.
+// pipelineToken gates all async work: incremented on cancel/folder-change.
+let pipelineToken = 0
+const processor = new OnDemandProcessor()
 
 // ─── Window ────────────────────────────────────────────────────────────────
 function createWindow() {
+  const savedTheme = getState().theme // null | 'dark' | 'light'
+  const symbolColor = savedTheme === 'light' ? '#a09890' : '#8a8078' // default dark
+
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -276,6 +373,26 @@ function createWindow() {
     minHeight: 500,
     show: false,
     autoHideMenuBar: true,
+    // ─── Title bar ─────────────────────────────────────────────────────────
+    // 'hidden' on macOS keeps traffic lights, on Windows activates WCO when
+    // combined with titleBarOverlay.
+    titleBarStyle: 'hidden',
+    // Windows only: native controls overlay + acrylic background material
+    ...(process.platform === 'win32' && {
+      titleBarOverlay: {
+        color: '#00000000', // transparent so acrylic shows through
+        symbolColor, // matches --text-tertiary per saved theme
+        height: 48 // matches our Vue titlebar height
+      },
+      backgroundMaterial: 'acrylic'
+    }),
+    // macOS only: vibrancy for the frosted glass effect
+    ...(process.platform === 'darwin' && {
+      vibrancy: 'under-window',
+      visualEffectState: 'active'
+    }),
+    backgroundColor: '#00000000',
+    // ───────────────────────────────────────────────────────────────────────
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -289,6 +406,20 @@ function createWindow() {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+}
+
+// ─── Single instance lock ──────────────────────────────────────────────────
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      if (win.isMinimized()) win.restore()
+      win.focus()
+    }
+  })
 }
 
 // ─── App ready ────────────────────────────────────────────────────────────
@@ -363,6 +494,30 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
+// ─── IPC: Cancel active pipeline ──────────────────────────────────────────
+// The renderer calls this at the start of every loadFolder so the previous
+// pipeline stops consuming CPU as soon as possible.
+ipcMain.on('pipeline:cancel', () => {
+  pipelineToken++ // invalidates all in-flight work for the current folder
+})
+
+// ─── IPC: Process visible videos on-demand ────────────────────────────────
+// The renderer sends filePaths of videos currently in the viewport
+// (+ lookahead). We process only those — nothing else runs in background.
+ipcMain.on('pipeline:process', (event, filePaths) => {
+  if (!Array.isArray(filePaths) || !filePaths.length) return
+  if (!processor._onDone) return
+  const cache = loadCache()
+  const myToken = pipelineToken
+  const send = (channel, data) => {
+    if (pipelineToken !== myToken) return
+    if (event.sender.isDestroyed()) return
+    event.sender.send(channel, data)
+  }
+  const alive = () => pipelineToken === myToken && !event.sender.isDestroyed()
+  processor.process(filePaths, { cache, send, alive, onDone: processor._onDone })
+})
+
 // ─── IPC: Open folder dialog ───────────────────────────────────────────────
 ipcMain.handle('dialog:openFolder', async () => {
   const result = await dialog.showOpenDialog({
@@ -423,63 +578,68 @@ ipcMain.handle('fs:readVideos', async (event, dirPath) => {
   rawVideos.sort((a, b) => b.modifiedAt - a.modifiedAt)
 
   const cache = loadCache()
-  let cacheChanged = false
-  const needDimProbe = rawVideos.filter((v) => {
-    const c = cache[v.filePath]
-    return !c || c.mtime !== v.mtime
-  })
-  if (needDimProbe.length > 0) {
-    await runWithConcurrency(
-      needDimProbe.map((v) => async () => {
-        const dims = await getVideoDimensions(v.filePath)
-        if (dims) {
-          cache[v.filePath] = { ...dims, mtime: v.mtime }
-          cacheChanged = true
-        }
-      }),
-      8
-    )
-  }
-  if (cacheChanged) saveCache(cache)
 
-  const videos = rawVideos.map((v) => {
+  // Build initial response using only cached dimensions — return immediately
+  // so the renderer can paint cards right away.
+  // Files whose cache entry has noStream:true (and whose mtime hasn't changed)
+  // are excluded upfront — no card is ever shown for them, avoiding the
+  // "blank card that disappears" flash on revisited folders.
+  const videos = rawVideos.reduce((acc, v) => {
     const dims = cache[v.filePath]
+    if (dims?.noStream && dims.mtime === v.mtime) return acc // skip silently
     const { path: thumbPath } = thumbPathForFile(v.filePath)
     const thumbExists = existsSync(thumbPath)
-    return {
+    acc.push({
       ...v,
       width: dims?.width || null,
       height: dims?.height || null,
       duration: dims?.duration || null,
       thumbnailUrl: thumbExists ? `localvideo://local/${encodeURIComponent(thumbPath)}` : null
-    }
-  })
+    })
+    return acc
+  }, [])
 
-  // Skip audio-only files (no video stream = no width from ffprobe)
-  const needThumb = videos.filter((v) => !v.thumbnailUrl && v.width)
-  if (needThumb.length > 0) {
-    ;(async () => {
-      await runWithConcurrency(
-        needThumb.map((v) => async () => {
-          if (event.sender.isDestroyed()) return
-          const outPath = await generateThumbnail(v.filePath, v.duration)
-          if (!outPath || event.sender.isDestroyed()) return
-          event.sender.send('thumbnail:ready', {
-            id: v.id,
-            thumbnailUrl: `localvideo://local/${encodeURIComponent(outPath)}`
-          })
-        }),
-        4
-      )
-    })()
-  }
+  // Invalidate any in-flight on-demand work from the previous folder.
+  pipelineToken++
 
+  // Build a filePath → video map so pipeline:process can look up video objects
+  // by filePath without scanning the array each time.
+  const videoMap = new Map(videos.map((v) => [v.filePath, v]))
+  processor._onDone = { videoMap, cacheChanged: false }
+
+  // Return immediately — no background work starts here.
+  // The renderer will call pipeline:process with the visible filePaths.
   return videos
 })
 
+// ─── IPC: Get first available thumbnail for a folder ─────────────────────
+// Scans the dimensions cache for files belonging to dirPath and returns the
+// localvideo:// URL of the first thumbnail that exists on disk.
+ipcMain.handle('store:getFolderThumb', (_event, dirPath) => {
+  if (!dirPath) return null
+  const cache = loadCache()
+  const normalDir = dirPath.replace(/\\/g, '/')
+  for (const filePath of Object.keys(cache)) {
+    const normalFile = filePath.replace(/\\/g, '/')
+    if (!normalFile.startsWith(normalDir)) continue
+    if (cache[filePath]?.noStream) continue
+    const { path: thumbPath } = thumbPathForFile(filePath)
+    if (existsSync(thumbPath)) {
+      return `localvideo://local/${encodeURIComponent(thumbPath)}`
+    }
+  }
+  return null
+})
+
 // ─── IPC: Shell utilities ──────────────────────────────────────────────────
-ipcMain.handle('shell:showInFolder', (_event, filePath) => shell.showItemInFolder(filePath))
-ipcMain.handle('shell:copyPath', (_event, filePath) => clipboard.writeText(filePath))
+ipcMain.handle('shell:showInFolder', (_event, filePath) => {
+  if (!filePath || typeof filePath !== 'string') return
+  shell.showItemInFolder(filePath)
+})
+ipcMain.handle('shell:copyPath', (_event, filePath) => {
+  if (!filePath || typeof filePath !== 'string') return
+  clipboard.writeText(filePath)
+})
 
 // ─── Helper: Node stream → Web ReadableStream ──────────────────────────────
 function nodeStreamToWebStream(nodeStream) {

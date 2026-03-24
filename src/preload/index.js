@@ -14,16 +14,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.off('thumbnail:ready', handler)
   },
 
+  onDimsReady: (callback) => {
+    const handler = (_event, data) => callback(data)
+    ipcRenderer.on('dims:ready', handler)
+    return () => ipcRenderer.off('dims:ready', handler)
+  },
+
+  // Fired when ffprobe finds no video stream — file should be removed from gallery
+  onVideoNoStream: (callback) => {
+    const handler = (_event, data) => callback(data)
+    ipcRenderer.on('video:no-stream', handler)
+    return () => ipcRenderer.off('video:no-stream', handler)
+  },
+
+  // Cancel all in-flight on-demand work (call before every loadFolder)
+  cancelPipeline: () => ipcRenderer.send('pipeline:cancel'),
+
+  // Request processing for a specific set of filePaths (visible + lookahead).
+  // Main process runs ffprobe + ffmpeg only for these — nothing else.
+  processPipeline: (filePaths) => ipcRenderer.send('pipeline:process', filePaths),
+
+  platform: process.platform,
+
   showInFolder: (filePath) => ipcRenderer.invoke('shell:showInFolder', filePath),
 
   copyPath: (filePath) => ipcRenderer.invoke('shell:copyPath', filePath),
 
-  // ─── Persistent store (replaces localStorage for app state) ─────────────
-  // Reads/writes app-state.json in Electron's userData directory.
-  // Keys: 'lastFolder' | 'folderHistory' | 'favorites'
   store: {
     get: (key) => ipcRenderer.invoke('store:get', key),
     set: (key, value) => ipcRenderer.invoke('store:set', key, value),
-    getAll: () => ipcRenderer.invoke('store:getAll')
+    getAll: () => ipcRenderer.invoke('store:getAll'),
+    getFolderThumb: (folderPath) => ipcRenderer.invoke('store:getFolderThumb', folderPath)
   }
 })

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { formatSize, formatDuration } from '../utils/format.js'
 
 const props = defineProps({
@@ -28,8 +28,17 @@ watch(
   }
 )
 
-async function copyPath() {
+function handleKey(e) {
   if (!props.video) return
+  if (e.key === 'Escape') { emit('close'); return }
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') emit('next')
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') emit('prev')
+}
+
+onMounted(() => document.addEventListener('keydown', handleKey))
+onUnmounted(() => document.removeEventListener('keydown', handleKey))
+
+async function copyPath() {
   await window.electronAPI?.copyPath(props.video.filePath)
   copied.value = true
   setTimeout(() => {

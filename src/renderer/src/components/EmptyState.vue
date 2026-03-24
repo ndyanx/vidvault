@@ -1,19 +1,76 @@
 <script setup>
-// EmptyState.vue
-// Folder thumbnails are no longer stored in localStorage.
-// The main process derives thumb paths deterministically from filePath,
-// so we can't reconstruct them here without an IPC call.
-// Instead we show a clean folder-icon placeholder for all recent entries.
-// If you want previews back, the right approach would be a new IPC handler
-// `store:getFolderThumb(path)` that checks the bucketed thumbnail dir.
-
+import { ref, watch } from 'vue'
 import { useVideoLibrary } from '../composables/useVideoLibrary.js'
 
 const { openFolderDialog, folderHistory, loadFolder, deleteFromHistory } = useVideoLibrary()
+
+// Map of folderPath → thumbnailUrl (null = no thumb available)
+const folderThumbs = ref({})
+
+async function loadThumbs(history) {
+  if (!window.electronAPI?.store?.getFolderThumb) return
+  const results = await Promise.all(
+    history.map(async (entry) => {
+      if (folderThumbs.value[entry.path] !== undefined) return
+      const url = await window.electronAPI.store.getFolderThumb(entry.path)
+      return [entry.path, url ?? null]
+    })
+  )
+  for (const item of results) {
+    if (item) folderThumbs.value[item[0]] = item[1]
+  }
+}
+
+watch(folderHistory, (val) => loadThumbs(val), { immediate: true })
+
+// ─── Drag & drop ───────────────────────────────────────────────────────────
+const isDragging = ref(false)
+
+function onDragOver(e) {
+  e.preventDefault()
+  isDragging.value = true
+}
+
+function onDragLeave(e) {
+  // Only clear if leaving the root element entirely
+  if (!e.currentTarget.contains(e.relatedTarget)) {
+    isDragging.value = false
+  }
+}
+
+async function onDrop(e) {
+  e.preventDefault()
+  isDragging.value = false
+  const file = e.dataTransfer.files[0]
+  if (!file) return
+  // In Electron, File objects have a .path property with the real fs path
+  const folderPath = file.path
+  if (!folderPath) return
+  await loadFolder(folderPath)
+}
 </script>
 
 <template>
-  <div class="empty-root">
+  <div
+    class="empty-root"
+    :class="{ 'is-dragging': isDragging }"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
+  >
+    <!-- Drop overlay -->
+    <Transition name="drop-overlay">
+      <div v-if="isDragging" class="drop-overlay" aria-hidden="true">
+        <div class="drop-overlay-inner">
+          <svg width="32" height="32" viewBox="0 0 16 16" fill="currentColor">
+            <path
+              d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
+            />
+          </svg>
+          <span>Suelta la carpeta aquí</span>
+        </div>
+      </div>
+    </Transition>
     <div class="empty-card">
       <!-- Deco grid -->
       <div class="deco-grid" aria-hidden="true">
@@ -65,7 +122,13 @@ const { openFolderDialog, folderHistory, loadFolder, deleteFromHistory } = useVi
           @click="loadFolder(entry.path)"
         >
           <div class="recent-thumb">
-            <div class="recent-thumb-placeholder">
+            <img
+              v-if="folderThumbs[entry.path]"
+              :src="folderThumbs[entry.path]"
+              class="recent-thumb-img"
+              draggable="false"
+            />
+            <div v-else class="recent-thumb-placeholder">
               <svg
                 width="20"
                 height="20"
@@ -118,6 +181,45 @@ const { openFolderDialog, folderHistory, loadFolder, deleteFromHistory } = useVi
   padding: 32px 40px;
   gap: 28px;
   overflow-y: auto;
+  position: relative;
+  transition: background 0.15s;
+}
+
+.empty-root.is-dragging {
+  background: var(--accent-subtle);
+}
+
+/* ─── Drop overlay ────────────────────────────────────────────────────────── */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  pointer-events: none;
+}
+
+.drop-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.drop-overlay-enter-active,
+.drop-overlay-leave-active {
+  transition: opacity 0.15s ease;
+}
+.drop-overlay-enter-from,
+.drop-overlay-leave-to {
+  opacity: 0;
 }
 
 /* ─── Main card ───────────────────────────────────────────────────────────── */
@@ -290,6 +392,12 @@ const { openFolderDialog, folderHistory, loadFolder, deleteFromHistory } = useVi
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.recent-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .recent-info {
