@@ -22,6 +22,48 @@ const searchQuery = ref('')
 const showFavoritesOnly = ref(false)
 const sortBy = ref('date') // 'date' | 'name' | 'size' | 'duration'
 
+// --- Hover preview ---
+const hoveredId = ref(null)
+let seekInterval = null
+let activeVideoEl = null
+
+function onCardEnter(event, video) {
+  if (!video.videoUrl || !video.duration) return
+  onCardLeave() // clean up any previous
+  hoveredId.value = video.id
+  const el = event.currentTarget.querySelector('.card-hover-video')
+  if (!el) return
+  activeVideoEl = el
+  el.src = video.videoUrl
+  el.muted = true
+  el.preload = 'metadata'
+  let t = 0
+  const step = Math.max(video.duration / 12, 1)
+  // Wait for metadata so seeks don't get ignored
+  const startSeeking = () => {
+    el.currentTime = t
+    seekInterval = setInterval(() => {
+      t = (t + step) % video.duration
+      el.currentTime = t
+    }, 350)
+  }
+  if (el.readyState >= 1) {
+    startSeeking()
+  } else {
+    el.addEventListener('loadedmetadata', startSeeking, { once: true })
+  }
+}
+
+function onCardLeave() {
+  clearInterval(seekInterval)
+  seekInterval = null
+  if (activeVideoEl) {
+    activeVideoEl.src = ''
+    activeVideoEl = null
+  }
+  hoveredId.value = null
+}
+
 const SORT_OPTIONS = computed(() => [
   { value: 'date', label: t('gallery.sortDate') },
   { value: 'name', label: t('gallery.sortName') },
@@ -373,7 +415,13 @@ onUnmounted(() => {
           :placeholder="t('gallery.searchPlaceholder')"
           spellcheck="false"
         />
-        <button v-if="searchQuery" class="search-clear" @click="searchQuery = ''" :aria-label="t('gallery.clearSearch')" :title="t('gallery.clearSearch')">
+        <button
+          v-if="searchQuery"
+          class="search-clear"
+          @click="searchQuery = ''"
+          :aria-label="t('gallery.clearSearch')"
+          :title="t('gallery.clearSearch')"
+        >
           <svg
             width="10"
             height="10"
@@ -460,6 +508,8 @@ onUnmounted(() => {
           }"
           @click="openModal(item.video)"
           @contextmenu="openContextMenu($event, item.video)"
+          @mouseenter="onCardEnter($event, item.video)"
+          @mouseleave="onCardLeave"
         >
           <Transition name="thumb-fade">
             <img
@@ -476,13 +526,26 @@ onUnmounted(() => {
             </div>
           </Transition>
 
+          <!-- Hover seek preview — always in DOM so querySelector finds it instantly -->
+          <video
+            v-if="item.video.videoUrl"
+            class="card-hover-video"
+            muted
+            preload="none"
+            draggable="false"
+          />
+
           <!-- Favorite button -->
           <button
             class="card-fav-btn"
             :class="{ active: isFavorite(item.video.id) }"
             @click.stop="toggleFavorite(item.video.id)"
-            :title="isFavorite(item.video.id) ? t('gallery.removeFavorite') : t('gallery.addFavorite')"
-            :aria-label="isFavorite(item.video.id) ? t('gallery.removeFavorite') : t('gallery.addFavorite')"
+            :title="
+              isFavorite(item.video.id) ? t('gallery.removeFavorite') : t('gallery.addFavorite')
+            "
+            :aria-label="
+              isFavorite(item.video.id) ? t('gallery.removeFavorite') : t('gallery.addFavorite')
+            "
             :aria-pressed="isFavorite(item.video.id)"
           >
             <svg
@@ -846,6 +909,20 @@ onUnmounted(() => {
 }
 .card-thumb {
   object-fit: cover;
+}
+.card-hover-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  pointer-events: none;
+  z-index: 1;
+}
+.gallery-card:hover .card-hover-video[src]:not([src='']) {
+  opacity: 1;
 }
 .card-thumb-placeholder {
   background: var(--bg-elevated);
