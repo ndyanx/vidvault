@@ -85,6 +85,7 @@ function showInFolder() {
                 class="action-btn"
                 @click="copyPath"
                 :title="copied ? t('modal.copied') : t('modal.copyPath')"
+                :aria-label="copied ? t('modal.copied') : t('modal.copyPath')"
               >
                 <svg
                   v-if="!copied"
@@ -110,7 +111,7 @@ function showInFolder() {
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
               </button>
-              <button class="action-btn" @click="showInFolder" :title="t('modal.showInFolder')">
+              <button class="action-btn" @click="showInFolder" :title="t('modal.showInFolder')" :aria-label="t('modal.showInFolder')">
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
                   <path
                     d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
@@ -119,7 +120,7 @@ function showInFolder() {
               </button>
             </div>
 
-            <button class="close-btn" @click="$emit('close')" :title="t('modal.close')">
+            <button class="close-btn" @click="$emit('close')" :title="t('modal.close')" :aria-label="t('modal.close')">
               <svg
                 width="16"
                 height="16"
@@ -141,6 +142,7 @@ function showInFolder() {
               class="nav-btn nav-prev"
               @click="$emit('prev')"
               :title="t('modal.prev')"
+              :aria-label="t('modal.prev')"
             >
               <svg
                 width="18"
@@ -170,6 +172,7 @@ function showInFolder() {
               class="nav-btn nav-next"
               @click="$emit('next')"
               :title="t('modal.next')"
+              :aria-label="t('modal.next')"
             >
               <svg
                 width="18"

@@ -98,7 +98,7 @@ async function onDrop(e) {
         </div>
         <h1 class="empty-title">{{ t('empty.title') }}</h1>
         <p class="empty-desc">{{ t('empty.desc') }}</p>
-        <button class="open-btn" @click="openFolderDialog">
+        <button class="open-btn" @click="openFolderDialog(t('titlebar.dialogTitle'))">
           <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
             <path
               d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"

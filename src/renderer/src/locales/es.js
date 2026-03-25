@@ -2,8 +2,11 @@ export default {
   // TitleBar
   titlebar: {
     openFolder: 'Abrir carpeta',
+    dialogTitle: 'Seleccionar carpeta de videos',
     loading: 'Cargando…',
     closeFolder: 'Cerrar carpeta',
+    folderPillLabel: 'Carpeta actual: {name}. Haz clic para ver carpetas recientes.',
+    removeLabel: 'Eliminar {name} del historial',
     recents: 'Recientes',
     openOther: 'Abrir otra carpeta…',
     themeDark: 'Modo oscuro',
@@ -46,7 +49,8 @@ export default {
     addFavorite: 'Marcar favorito',
     removeFavorite: 'Quitar favorito',
     showInFolder: 'Mostrar en carpeta',
-    copyPath: 'Copiar ruta'
+    copyPath: 'Copiar ruta',
+    clearSearch: 'Limpiar búsqueda'
   },
 
   // VideoModal

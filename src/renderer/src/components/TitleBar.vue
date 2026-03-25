@@ -45,7 +45,7 @@ watch(folderHistory, (val) => loadThumbs(val), { immediate: true })
 
 const toggleHistory = () => {
   if (folderHistory.value.length === 0) {
-    openFolderDialog()
+    openFolderDialog(t('titlebar.dialogTitle'))
     return
   }
   showHistory.value = !showHistory.value
@@ -93,7 +93,13 @@ function relativeTime(ts) {
     <!-- Center: folder pill -->
     <div class="titlebar-center">
       <div class="folder-control" v-if="currentFolder">
-        <button class="folder-pill" @click="toggleHistory" :title="currentFolder">
+        <button
+          class="folder-pill"
+          @click="toggleHistory"
+          :title="currentFolder"
+          :aria-label="t('titlebar.folderPillLabel', { name: folderName })"
+          :aria-expanded="showHistory"
+        >
           <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
             <path
               d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
@@ -115,7 +121,12 @@ function relativeTime(ts) {
           </svg>
         </button>
 
-        <button class="close-folder-btn" @click="closeFolder" :title="t('titlebar.closeFolder')">
+        <button
+          class="close-folder-btn"
+          @click="closeFolder"
+          :title="t('titlebar.closeFolder')"
+          :aria-label="t('titlebar.closeFolder')"
+        >
           <svg
             width="11"
             height="11"
@@ -171,6 +182,7 @@ function relativeTime(ts) {
                   class="history-remove"
                   @click="removeFolder($event, entry.path)"
                   :title="t('titlebar.remove')"
+                  :aria-label="t('titlebar.removeLabel', { name: entry.name })"
                 >
                   <svg
                     width="10"
@@ -192,7 +204,7 @@ function relativeTime(ts) {
               @click="
                 () => {
                   showHistory = false
-                  openFolderDialog()
+                  openFolderDialog(t('titlebar.dialogTitle'))
                 }
               "
             >
@@ -212,9 +224,10 @@ function relativeTime(ts) {
     <div class="titlebar-controls">
       <button
         class="ctrl-btn open-btn"
-        @click="openFolderDialog"
+        @click="openFolderDialog(t('titlebar.dialogTitle'))"
         :disabled="isLoading"
         :title="t('titlebar.openFolder')"
+        :aria-label="t('titlebar.openFolder')"
       >
         <svg v-if="!isLoading" width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
           <path
@@ -241,6 +254,7 @@ function relativeTime(ts) {
         class="ctrl-btn icon-btn lang-btn"
         @click="$emit('toggle-locale')"
         :title="locale === 'es' ? 'Switch to English' : 'Cambiar a Español'"
+        :aria-label="locale === 'es' ? 'Switch to English' : 'Cambiar a Español'"
       >
         {{ locale === 'es' ? 'EN' : 'ES' }}
       </button>
@@ -250,6 +264,7 @@ function relativeTime(ts) {
         class="ctrl-btn icon-btn"
         @click="$emit('toggle-theme')"
         :title="isDark ? t('titlebar.themeLight') : t('titlebar.themeDark')"
+        :aria-label="isDark ? t('titlebar.themeLight') : t('titlebar.themeDark')"
       >
         <svg
           v-if="isDark"

@@ -4,7 +4,7 @@ import { electronAPI } from '@electron-toolkit/preload'
 contextBridge.exposeInMainWorld('electron', electronAPI)
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
+  openFolder: (title) => ipcRenderer.invoke('dialog:openFolder', title),
 
   readVideos: (dirPath) => ipcRenderer.invoke('fs:readVideos', dirPath),
 

@@ -373,7 +373,7 @@ onUnmounted(() => {
           :placeholder="t('gallery.searchPlaceholder')"
           spellcheck="false"
         />
-        <button v-if="searchQuery" class="search-clear" @click="searchQuery = ''">
+        <button v-if="searchQuery" class="search-clear" @click="searchQuery = ''" :aria-label="t('gallery.clearSearch')" :title="t('gallery.clearSearch')">
           <svg
             width="10"
             height="10"
@@ -413,6 +413,8 @@ onUnmounted(() => {
         :class="{ active: showFavoritesOnly }"
         @click="showFavoritesOnly = !showFavoritesOnly"
         :title="t('gallery.onlyFavorites')"
+        :aria-label="t('gallery.onlyFavorites')"
+        :aria-pressed="showFavoritesOnly"
       >
         <svg
           width="13"
@@ -479,7 +481,9 @@ onUnmounted(() => {
             class="card-fav-btn"
             :class="{ active: isFavorite(item.video.id) }"
             @click.stop="toggleFavorite(item.video.id)"
-            :title="t('gallery.favorite')"
+            :title="isFavorite(item.video.id) ? t('gallery.removeFavorite') : t('gallery.addFavorite')"
+            :aria-label="isFavorite(item.video.id) ? t('gallery.removeFavorite') : t('gallery.addFavorite')"
+            :aria-pressed="isFavorite(item.video.id)"
           >
             <svg
               width="12"

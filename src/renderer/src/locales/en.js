@@ -2,8 +2,11 @@ export default {
   // TitleBar
   titlebar: {
     openFolder: 'Open folder',
+    dialogTitle: 'Select video folder',
     loading: 'Loading…',
     closeFolder: 'Close folder',
+    folderPillLabel: 'Current folder: {name}. Click to open recent folders.',
+    removeLabel: 'Remove {name} from history',
     recents: 'Recent',
     openOther: 'Open another folder…',
     themeDark: 'Dark mode',
@@ -46,7 +49,8 @@ export default {
     addFavorite: 'Add to favorites',
     removeFavorite: 'Remove from favorites',
     showInFolder: 'Show in folder',
-    copyPath: 'Copy path'
+    copyPath: 'Copy path',
+    clearSearch: 'Clear search'
   },
 
   // VideoModal

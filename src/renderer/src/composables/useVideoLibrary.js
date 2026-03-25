@@ -132,9 +132,9 @@ export function useVideoLibrary() {
     }
   }
 
-  async function openFolderDialog() {
+  async function openFolderDialog(dialogTitle) {
     if (!isElectron) return
-    const folderPath = await window.electronAPI.openFolder()
+    const folderPath = await window.electronAPI.openFolder(dialogTitle || '')
     if (folderPath) await loadFolder(folderPath)
   }
 
@@ -181,9 +181,8 @@ export function useVideoLibrary() {
       if (state.lastFolder) {
         await loadFolder(state.lastFolder)
       }
+      isInitializing.value = false
     })()
-    await initPromise
-    isInitializing.value = false
     return initPromise
   }
 

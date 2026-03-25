@@ -306,6 +306,16 @@ class OnDemandProcessor {
     send('thumbnail:ready', { id: v.id, thumbnailUrl: url })
   }
 
+  // Encapsulated accessor for the onDone context object.
+  // Prefer setOnDone() over direct _onDone assignment from outside the class.
+  get onDone() {
+    return this._onDoneCtx
+  }
+
+  setOnDone(value) {
+    this._onDoneCtx = value
+  }
+
   // Hard reset — called when a new folder is loaded
   reset() {
     this._queue = []
@@ -633,7 +643,7 @@ ipcMain.on('pipeline:cancel', () => {
 // #3 fix: loadCache() is now async so we await it before reprioritizing.
 ipcMain.on('pipeline:process', async (event, filePaths) => {
   if (!Array.isArray(filePaths) || !filePaths.length) return
-  if (!processor._onDone?.videoMap?.size) return
+  if (!processor.onDone?.videoMap?.size) return
   const cache = await loadCache()
   const myToken = pipelineToken
   const send = (channel, data) => {
@@ -642,13 +652,13 @@ ipcMain.on('pipeline:process', async (event, filePaths) => {
     event.sender.send(channel, data)
   }
   const alive = () => pipelineToken === myToken && !event.sender.isDestroyed()
-  processor.reprioritize(filePaths, { cache, send, alive, onDone: processor._onDone })
+  processor.reprioritize(filePaths, { cache, send, alive, onDone: processor.onDone })
 })
 
-ipcMain.handle('dialog:openFolder', async () => {
+ipcMain.handle('dialog:openFolder', async (event, title) => {
   const result = await dialog.showOpenDialog({
     properties: ['openDirectory'],
-    title: 'Seleccionar carpeta de videos'
+    title: title || 'Open folder'
   })
   if (result.canceled || result.filePaths.length === 0) return null
   return result.filePaths[0]
@@ -742,7 +752,7 @@ ipcMain.handle('fs:readVideos', async (event, dirPath) => {
   pipelineToken++
   processor.reset()
   const videoMap = new Map(videos.map((v) => [v.filePath, v]))
-  processor._onDone = { videoMap, cacheChanged: false }
+  processor.setOnDone({ videoMap, cacheChanged: false })
 
   startFolderWatch(dirPath).catch(console.error)
 
