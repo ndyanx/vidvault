@@ -20,14 +20,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.off('dims:ready', handler)
   },
 
-  // Fired when ffprobe finds no video stream — file should be removed from gallery
+  // Fired when ffprobe finds no video stream — card should be removed from gallery
   onVideoNoStream: (callback) => {
     const handler = (_event, data) => callback(data)
     ipcRenderer.on('video:no-stream', handler)
     return () => ipcRenderer.off('video:no-stream', handler)
   },
 
-  // Cancel all in-flight on-demand work (call before every loadFolder)
+  // Call before every loadFolder to cancel in-flight work for the previous folder
   cancelPipeline: () => ipcRenderer.send('pipeline:cancel'),
 
   // Notified when the watched folder changes (poll ~30s). Payload: { added, removed }
@@ -37,8 +37,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.off('folder:changed', handler)
   },
 
-  // Request processing for a specific set of filePaths (visible + lookahead).
-  // Main process runs ffprobe + ffmpeg only for these — nothing else.
+  // Request processing for a set of filePaths (visible + lookahead).
+  // Main process runs ffprobe + ffmpeg only for these paths.
   processPipeline: (filePaths) => ipcRenderer.send('pipeline:process', filePaths),
 
   platform: process.platform,
@@ -47,19 +47,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   copyPath: (filePath) => ipcRenderer.invoke('shell:copyPath', filePath),
 
-  // ── Drag & drop ────────────────────────────────────────────────────────
-  // Con contextIsolation:true, File.path está undefined en el renderer.
-  // webUtils.getPathForFile() es la API oficial de Electron (v32+) para
-  // obtener el path real del filesystem desde un objeto File del DOM.
-  // Para versiones anteriores, File.path aún funciona en el preload context
-  // porque el preload corre en el contexto de Node, no del renderer.
+  // With contextIsolation:true, File.path is undefined in the renderer.
+  // webUtils.getPathForFile() is the official Electron API (v32+) to get the
+  // real filesystem path from a DOM File object.
   getDroppedFolderPath: (file) => {
     try {
       if (webUtils && typeof webUtils.getPathForFile === 'function') {
         return webUtils.getPathForFile(file)
       }
     } catch {
-      // webUtils no disponible en esta versión de Electron
+      // webUtils unavailable in older Electron versions
     }
     return file?.path ?? null
   },

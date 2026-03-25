@@ -3,14 +3,13 @@ import { ref, watchEffect } from 'vue'
 const isElectron = typeof window !== 'undefined' && typeof window.electronAPI !== 'undefined'
 const store = isElectron ? window.electronAPI.store : null
 
-// Detect system preference as default
+// Default to system preference; overwritten once the store resolves
 const systemDark =
   typeof window !== 'undefined' ? window.matchMedia?.('(prefers-color-scheme: dark)').matches : false
 
-// Start with system preference; will be overwritten once store resolves
 const isDark = ref(systemDark)
 
-// Load persisted value from Electron store
+// Load persisted theme on startup
 if (isElectron) {
   store
     .get('theme')
@@ -21,7 +20,6 @@ if (isElectron) {
     })
     .catch(() => {})
 } else if (typeof window !== 'undefined') {
-  // Fallback for browser/dev context
   const saved = localStorage.getItem('vidvault-theme')
   if (saved) isDark.value = saved === 'dark'
 }

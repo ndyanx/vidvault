@@ -1,6 +1,9 @@
 <script setup>
 import { ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useVideoLibrary } from '../composables/useVideoLibrary.js'
+
+const { t } = useI18n()
 
 const { openFolderDialog, folderHistory, loadFolder, deleteFromHistory } = useVideoLibrary()
 
@@ -23,7 +26,6 @@ async function loadThumbs(history) {
 
 watch(folderHistory, (val) => loadThumbs(val), { immediate: true })
 
-// ─── Drag & drop ───────────────────────────────────────────────────────────
 const isDragging = ref(false)
 
 function onDragOver(e) {
@@ -66,7 +68,7 @@ async function onDrop(e) {
               d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
             />
           </svg>
-          <span>Suelta la carpeta aquí</span>
+          <span>{{ t('empty.dropHere') }}</span>
         </div>
       </div>
     </Transition>
@@ -94,25 +96,23 @@ async function onDrop(e) {
             <polygon points="9.75 15.02 15.5 12 9.75 8.98 9.75 15.02" />
           </svg>
         </div>
-        <h1 class="empty-title">Sin videos</h1>
-        <p class="empty-desc">
-          Abre una carpeta con tus videos locales y aparecerán organizados en un masonry gallery.
-        </p>
+        <h1 class="empty-title">{{ t('empty.title') }}</h1>
+        <p class="empty-desc">{{ t('empty.desc') }}</p>
         <button class="open-btn" @click="openFolderDialog">
           <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
             <path
               d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
             />
           </svg>
-          Abrir carpeta
+          {{ t('empty.openBtn') }}
         </button>
-        <p class="empty-hint">mp4 · mov · mkv · avi · webm y más</p>
+        <p class="empty-hint">{{ t('empty.hint') }}</p>
       </div>
     </div>
 
     <!-- Recent folders -->
     <div v-if="folderHistory.length" class="recents">
-      <div class="recents-header">Recientes</div>
+      <div class="recents-header">{{ t('empty.recents') }}</div>
       <div class="recents-grid">
         <div
           v-for="entry in folderHistory"
@@ -150,7 +150,7 @@ async function onDrop(e) {
           <button
             class="recent-remove"
             @click.stop="deleteFromHistory(entry.path)"
-            title="Eliminar del historial"
+            title="Remove from history"
           >
             <svg
               width="10"
@@ -188,7 +188,6 @@ async function onDrop(e) {
   background: var(--accent-subtle);
 }
 
-/* ─── Drop overlay ────────────────────────────────────────────────────────── */
 .drop-overlay {
   position: absolute;
   inset: 0;
@@ -221,7 +220,6 @@ async function onDrop(e) {
   opacity: 0;
 }
 
-/* ─── Main card ───────────────────────────────────────────────────────────── */
 .empty-card {
   position: relative;
   width: 100%;
@@ -329,7 +327,6 @@ async function onDrop(e) {
   letter-spacing: 0.05em;
 }
 
-/* ─── Recents ─────────────────────────────────────────────────────────────── */
 .recents {
   width: 100%;
   max-width: 560px;

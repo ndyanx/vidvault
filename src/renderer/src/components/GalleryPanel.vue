@@ -1,32 +1,33 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useVideoLibrary } from '../composables/useVideoLibrary.js'
 import { useFavorites } from '../composables/useFavorites.js'
 import { formatDuration } from '../utils/format.js'
 import VideoSkeleton from './VideoSkeleton.vue'
 import VideoModal from './VideoModal.vue'
 
+const { t } = useI18n()
+
 const { videos, isLoading, processVisible, loadFolder } = useVideoLibrary()
 const { isFavorite, toggle: toggleFavorite } = useFavorites()
 
-// ─── Constants ────────────────────────────────────────────────────────────
 const GAP = 10
 const VIEWPORT_MARGIN = 400 // px of extra rendering margin (virtual scroll)
 const PROCESS_LOOKAHEAD = 800 // px below viewport to pre-process (1 extra screen approx)
 const IDLE_DELAY = 20_000 // ms of inactivity before background idle processing kicks in
 const DEFAULT_RATIO = 9 / 16
 
-// ─── Search / filter / sort ────────────────────────────────────────────────
 const searchQuery = ref('')
 const showFavoritesOnly = ref(false)
 const sortBy = ref('date') // 'date' | 'name' | 'size' | 'duration'
 
-const SORT_OPTIONS = [
-  { value: 'date', label: 'Fecha' },
-  { value: 'name', label: 'Nombre' },
-  { value: 'size', label: 'Tamaño' },
-  { value: 'duration', label: 'Duración' }
-]
+const SORT_OPTIONS = computed(() => [
+  { value: 'date', label: t('gallery.sortDate') },
+  { value: 'name', label: t('gallery.sortName') },
+  { value: 'size', label: t('gallery.sortSize') },
+  { value: 'duration', label: t('gallery.sortDuration') }
+])
 
 const filteredVideos = computed(() => {
   let list = videos.value
@@ -53,7 +54,6 @@ const filteredVideos = computed(() => {
   return list
 })
 
-// ─── Layout ────────────────────────────────────────────────────────────────
 const rootRef = ref(null)
 const colCount = ref(4)
 const colWidth = ref(200)
@@ -86,7 +86,6 @@ function buildLayout(vids, cols, cw) {
   containerHeight.value = Math.max(...colHeights)
 }
 
-// ─── Virtualization ────────────────────────────────────────────────────────
 const viewportHeight = ref(800)
 
 const visibleItems = computed(() => {
@@ -100,7 +99,6 @@ const handleScroll = (e) => {
   scheduleProcess(true) // scroll is user-driven — process immediately
 }
 
-// ─── On-demand processing ──────────────────────────────────────────────────
 // Three priority tiers, all funneled through the same OnDemandProcessor:
 //   1. visible   — inside viewport (immediate on scroll/thumb arrive)
 //   2. lookahead — PROCESS_LOOKAHEAD px below viewport (same call)
@@ -166,7 +164,6 @@ function scheduleProcess(immediate = false) {
   }
 }
 
-// ─── Sticky scroll ─────────────────────────────────────────────────────────
 // When dims arrive and buildLayout() shifts card positions, preserve the
 // user's scroll position so the viewport doesn't jump.
 let savedScrollTop = null
@@ -182,12 +179,15 @@ function restoreScroll() {
 
 // Watch dims/thumb arriving — after layout rebuilds, restore scroll and
 // schedule the next batch of on-demand processing for the new viewport.
+// Usamos scheduleProcess(false) aquí (debounced 150ms) para evitar llamadas
+// duplicadas cuando el scroll ya disparó scheduleProcess(true) en el mismo tick.
+// immediate=true queda reservado exclusivamente para eventos de scroll del usuario.
 watch(
   visibleItems,
   () => {
     nextTick(() => {
       restoreScroll()
-      scheduleProcess(true) // immediate — a new item entered viewport or a thumb arrived
+      scheduleProcess(false)
     })
   },
   { flush: 'post' }
@@ -224,7 +224,6 @@ watch(
   { flush: 'post' }
 )
 
-// ─── Context menu ──────────────────────────────────────────────────────────
 const ctxMenu = ref(null)
 const ctxRef = ref(null)
 
@@ -263,7 +262,6 @@ const handleGlobalMousedown = (e) => {
   if (ctxRef.value && !ctxRef.value.contains(e.target)) closeContextMenu()
 }
 
-// ─── Modal + keyboard nav ──────────────────────────────────────────────────
 const modalVideo = ref(null)
 const modalIndex = ref(-1)
 
@@ -290,7 +288,6 @@ const handleKey = (e) => {
   if (e.key === 'Escape' && ctxMenu.value) closeContextMenu()
 }
 
-// ─── Drag & drop ───────────────────────────────────────────────────────────
 const isDraggingFolder = ref(false)
 
 function onGalleryDragOver(e) {
@@ -308,9 +305,8 @@ async function onGalleryDrop(e) {
   e.preventDefault()
   isDraggingFolder.value = false
 
-  // File.path no existe en el renderer con contextIsolation:true.
-  // getDroppedFolderPath() corre en el preload (contexto Node) donde
-  // webUtils.getPathForFile() sí tiene acceso al path real del filesystem.
+  // File.path is undefined in the renderer with contextIsolation:true.
+  // getDroppedFolderPath() runs in the preload where webUtils.getPathForFile() works.
   const file = e.dataTransfer.files[0] ?? e.dataTransfer.items?.[0]?.getAsFile()
   if (!file) return
   const folderPath = window.electronAPI.getDroppedFolderPath(file)
@@ -318,7 +314,6 @@ async function onGalleryDrop(e) {
   await loadFolder(folderPath)
 }
 
-// ─── Lifecycle ─────────────────────────────────────────────────────────────
 onMounted(() => {
   resizeObserver = new ResizeObserver(() => updateLayout())
   if (rootRef.value) resizeObserver.observe(rootRef.value)
@@ -354,11 +349,10 @@ onUnmounted(() => {
               d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
             />
           </svg>
-          <span>Suelta para abrir esta carpeta</span>
+          <span>{{ t('gallery.dropHere') }}</span>
         </div>
       </div>
     </Transition>
-    <!-- ── Toolbar ──────────────────────────────────────────────────────── -->
     <div class="gallery-toolbar" v-if="!isLoading && videos.length">
       <div class="search-wrap">
         <svg
@@ -376,7 +370,7 @@ onUnmounted(() => {
         <input
           v-model="searchQuery"
           class="search-input"
-          placeholder="Buscar por nombre…"
+          :placeholder="t('gallery.searchPlaceholder')"
           spellcheck="false"
         />
         <button v-if="searchQuery" class="search-clear" @click="searchQuery = ''">
@@ -418,7 +412,7 @@ onUnmounted(() => {
         class="fav-filter-btn"
         :class="{ active: showFavoritesOnly }"
         @click="showFavoritesOnly = !showFavoritesOnly"
-        title="Solo favoritos"
+        :title="t('gallery.onlyFavorites')"
       >
         <svg
           width="13"
@@ -432,12 +426,12 @@ onUnmounted(() => {
             points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
           />
         </svg>
-        <span>Favoritos</span>
+        <span>{{ t('gallery.favorites') }}</span>
         <span v-if="showFavoritesOnly" class="fav-count">{{ filteredVideos.length }}</span>
       </button>
 
       <span class="result-count" v-if="searchQuery || showFavoritesOnly">
-        {{ filteredVideos.length }} resultado{{ filteredVideos.length !== 1 ? 's' : '' }}
+        {{ t('gallery.resultCount', filteredVideos.length) }}
       </span>
     </div>
 
@@ -485,7 +479,7 @@ onUnmounted(() => {
             class="card-fav-btn"
             :class="{ active: isFavorite(item.video.id) }"
             @click.stop="toggleFavorite(item.video.id)"
-            title="Favorito"
+            :title="t('gallery.favorite')"
           >
             <svg
               width="12"
@@ -525,8 +519,10 @@ onUnmounted(() => {
       </TransitionGroup>
 
       <div :class="{ 'modal-open': !!modalVideo }" :style="{ top: containerHeight + 8 + 'px' }">
-        {{ filteredVideos.length }} video{{ filteredVideos.length !== 1 ? 's' : '' }}
-        <template v-if="filteredVideos.length !== videos.length"> de {{ videos.length }}</template>
+        {{ t('gallery.videoCount', filteredVideos.length) }}
+        <template v-if="filteredVideos.length !== videos.length">
+          {{ t('gallery.of') }} {{ videos.length }}</template
+        >
       </div>
     </div>
 
@@ -544,13 +540,13 @@ onUnmounted(() => {
         <line x1="21" y1="21" x2="16.65" y2="16.65" />
       </svg>
       <p>
-        Sin resultados para <em>{{ searchQuery || 'favoritos' }}</em>
+        {{ t('gallery.noResults') }} <em>{{ searchQuery || t('gallery.favorites') }}</em>
       </p>
     </div>
 
     <!-- Empty folder -->
     <div v-else-if="!isLoading" class="gallery-empty">
-      <p>No se encontraron videos en esta carpeta.</p>
+      <p>{{ t('gallery.noVideos') }}</p>
     </div>
 
     <!-- Context menu -->
@@ -565,7 +561,7 @@ onUnmounted(() => {
           <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
             <polygon points="5 3 19 12 5 21 5 3" />
           </svg>
-          Reproducir
+          {{ t('gallery.play') }}
         </button>
         <button class="ctx-item" @click="ctxToggleFavorite">
           <svg
@@ -580,7 +576,11 @@ onUnmounted(() => {
               points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
             />
           </svg>
-          {{ ctxMenu && isFavorite(ctxMenu.video.id) ? 'Quitar favorito' : 'Marcar favorito' }}
+          {{
+            ctxMenu && isFavorite(ctxMenu.video.id)
+              ? t('gallery.removeFavorite')
+              : t('gallery.addFavorite')
+          }}
         </button>
         <div class="ctx-divider" />
         <button class="ctx-item" @click="ctxShowInFolder">
@@ -589,7 +589,7 @@ onUnmounted(() => {
               d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
             />
           </svg>
-          Mostrar en carpeta
+          {{ t('gallery.showInFolder') }}
         </button>
         <button class="ctx-item" @click="ctxCopyPath">
           <svg
@@ -603,7 +603,7 @@ onUnmounted(() => {
             <rect x="9" y="9" width="13" height="13" rx="2" />
             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
           </svg>
-          Copiar ruta
+          {{ t('gallery.copyPath') }}
         </button>
       </div>
     </Teleport>
@@ -634,7 +634,6 @@ onUnmounted(() => {
   background: var(--accent-subtle);
 }
 
-/* ─── Drop overlay ────────────────────────────────────────────────────────── */
 .drop-overlay {
   position: fixed;
   inset: 0;
@@ -671,7 +670,6 @@ onUnmounted(() => {
   opacity: 0;
 }
 
-/* ─── Toolbar ─────────────────────────────────────────────────────────────── */
 .gallery-toolbar {
   display: flex;
   align-items: center;
@@ -800,13 +798,11 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-/* ─── Canvas ──────────────────────────────────────────────────────────────── */
 .gallery-canvas {
   position: relative;
   width: 100%;
 }
 
-/* ─── Card ────────────────────────────────────────────────────────────────── */
 .gallery-card {
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -836,7 +832,6 @@ onUnmounted(() => {
   opacity: 1;
 }
 
-/* ─── Thumbnail ───────────────────────────────────────────────────────────── */
 .card-thumb,
 .card-thumb-placeholder {
   position: absolute;
@@ -889,7 +884,6 @@ onUnmounted(() => {
   opacity: 0;
 }
 
-/* ─── Card remove transition (no-stream files on first scan) ──────────────── */
 .card-remove-leave-active {
   transition:
     opacity 0.2s ease,
@@ -901,7 +895,6 @@ onUnmounted(() => {
   transform: scale(0.95);
 }
 
-/* ─── Favorite button ─────────────────────────────────────────────────────── */
 .card-fav-btn {
   position: absolute;
   top: 7px;
@@ -934,7 +927,6 @@ onUnmounted(() => {
   background: rgba(0, 0, 0, 0.65);
 }
 
-/* ─── Duration badge ──────────────────────────────────────────────────────── */
 .card-duration {
   position: absolute;
   bottom: 8px;
@@ -952,7 +944,6 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-/* ─── Overlay ─────────────────────────────────────────────────────────────── */
 .card-overlay {
   position: absolute;
   bottom: 0;
@@ -995,7 +986,6 @@ onUnmounted(() => {
   color: rgba(255, 255, 255, 0.5);
 }
 
-/* ─── Play icon ───────────────────────────────────────────────────────────── */
 .card-play-icon {
   position: absolute;
   top: 50%;
@@ -1019,7 +1009,6 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-/* ─── Context menu ────────────────────────────────────────────────────────── */
 .ctx-menu {
   position: fixed;
   z-index: 9000;
@@ -1063,7 +1052,6 @@ onUnmounted(() => {
   margin: 3px 0;
 }
 
-/* ─── Footer ──────────────────────────────────────────────────────────────── */
 .gallery-footer {
   position: absolute;
   left: 0;
@@ -1080,7 +1068,6 @@ onUnmounted(() => {
   opacity: 0;
 }
 
-/* ─── Empty ───────────────────────────────────────────────────────────────── */
 .gallery-empty {
   height: calc(100% - 60px);
   display: flex;

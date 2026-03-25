@@ -1,5 +1,3 @@
-// ─── Shared formatting utilities ─────────────────────────────────────────────
-
 export function formatSize(bytes) {
   if (!bytes) return '—'
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`

@@ -1,6 +1,9 @@
 <script setup>
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { formatSize, formatDuration } from '../utils/format.js'
+
+const { t } = useI18n()
 
 const props = defineProps({
   video: { type: Object, default: null },
@@ -13,7 +16,6 @@ const emit = defineEmits(['close', 'prev', 'next'])
 const videoRef = ref(null)
 const copied = ref(false)
 
-// Play/reset when video changes; pause before switching or closing
 watch(
   () => props.video,
   async (newVideo) => {
@@ -30,7 +32,10 @@ watch(
 
 function handleKey(e) {
   if (!props.video) return
-  if (e.key === 'Escape') { emit('close'); return }
+  if (e.key === 'Escape') {
+    emit('close')
+    return
+  }
   if (e.key === 'ArrowRight' || e.key === 'ArrowDown') emit('next')
   if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') emit('prev')
 }
@@ -79,7 +84,7 @@ function showInFolder() {
               <button
                 class="action-btn"
                 @click="copyPath"
-                :title="copied ? '¡Copiado!' : 'Copiar ruta'"
+                :title="copied ? t('modal.copied') : t('modal.copyPath')"
               >
                 <svg
                   v-if="!copied"
@@ -105,7 +110,7 @@ function showInFolder() {
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
               </button>
-              <button class="action-btn" @click="showInFolder" title="Mostrar en carpeta">
+              <button class="action-btn" @click="showInFolder" :title="t('modal.showInFolder')">
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
                   <path
                     d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
@@ -114,7 +119,7 @@ function showInFolder() {
               </button>
             </div>
 
-            <button class="close-btn" @click="$emit('close')" title="Cerrar (Esc)">
+            <button class="close-btn" @click="$emit('close')" :title="t('modal.close')">
               <svg
                 width="16"
                 height="16"
@@ -131,12 +136,11 @@ function showInFolder() {
 
           <!-- Video + nav arrows -->
           <div class="modal-video-area">
-            <!-- Prev -->
             <button
               v-if="hasPrev"
               class="nav-btn nav-prev"
               @click="$emit('prev')"
-              title="Anterior (←)"
+              :title="t('modal.prev')"
             >
               <svg
                 width="18"
@@ -161,12 +165,11 @@ function showInFolder() {
               />
             </div>
 
-            <!-- Next -->
             <button
               v-if="hasNext"
               class="nav-btn nav-next"
               @click="$emit('next')"
-              title="Siguiente (→)"
+              :title="t('modal.next')"
             >
               <svg
                 width="18"
@@ -208,7 +211,6 @@ function showInFolder() {
   gap: 12px;
 }
 
-/* ─── Header ──────────────────────────────────────────────────────────────── */
 .modal-header {
   display: flex;
   align-items: center;
@@ -313,7 +315,6 @@ function showInFolder() {
   color: white;
 }
 
-/* ─── Video area with side nav ────────────────────────────────────────────── */
 .modal-video-area {
   flex: 1;
   min-height: 0;
@@ -342,7 +343,6 @@ function showInFolder() {
   display: block;
 }
 
-/* ─── Nav buttons ─────────────────────────────────────────────────────────── */
 .nav-btn {
   display: flex;
   align-items: center;

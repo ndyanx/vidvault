@@ -6,7 +6,7 @@ const MAX_HISTORY = 8
 const videos = ref([])
 const currentFolder = ref(null)
 const isLoading = ref(false)
-const isInitializing = ref(true) // true until init() resolves; suppresses EmptyState flash
+const isInitializing = ref(true) // suppresses EmptyState flash until init() resolves
 const error = ref(null)
 const folderHistory = ref([])
 
@@ -27,7 +27,7 @@ function removeFromHistory(history, folderPath) {
   return history.filter((h) => h.path !== folderPath)
 }
 
-// Deep-clone via JSON to strip any Vue proxy wrappers before sending over IPC.
+// Deep-clone via JSON to strip Vue proxy wrappers before sending over IPC.
 // Electron's contextBridge uses structured clone, which chokes on Proxy objects.
 function toPlain(val) {
   return JSON.parse(JSON.stringify(val))
@@ -65,7 +65,7 @@ function ensureFolderWatcher(loadFolder, applyDiff) {
   if (unsubscribeFolderChanged || !isElectron) return
   unsubscribeFolderChanged = window.electronAPI.onFolderChanged((diff) => {
     if (!currentFolder.value) return
-    // If files were removed or modified, do a full reload — layout needs to rebuild
+    // Removals require a full reload so the layout can rebuild correctly
     if (diff.removed.length) { loadFolder(currentFolder.value); return }
     // Only additions — append new cards without touching existing ones
     if (diff.added.length) applyDiff(diff.added)

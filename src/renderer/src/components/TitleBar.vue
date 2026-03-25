@@ -1,9 +1,12 @@
 <script setup>
 import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useVideoLibrary } from '../composables/useVideoLibrary.js'
 
-const props = defineProps({ isDark: Boolean })
-const emit = defineEmits(['toggle-theme'])
+const { t } = useI18n()
+
+const props = defineProps({ isDark: Boolean, locale: String })
+const emit = defineEmits(['toggle-theme', 'toggle-locale'])
 
 const isMac = window.electronAPI?.platform === 'darwin'
 
@@ -19,7 +22,6 @@ const {
   deleteFromHistory
 } = useVideoLibrary()
 
-// ─── History dropdown ──────────────────────────────────────────────────────
 const showHistory = ref(false)
 
 // Folder thumbnails for the history dropdown
@@ -71,10 +73,10 @@ function relativeTime(ts) {
   const m = Math.floor(diff / 60000)
   const h = Math.floor(diff / 3600000)
   const d = Math.floor(diff / 86400000)
-  if (m < 1) return 'ahora'
-  if (m < 60) return `hace ${m}m`
-  if (h < 24) return `hace ${h}h`
-  return `hace ${d}d`
+  if (m < 1) return t('titlebar.timeNow')
+  if (m < 60) return t('titlebar.timeMinutes', { m })
+  if (h < 24) return t('titlebar.timeHours', { h })
+  return t('titlebar.timeDays', { d })
 }
 </script>
 
@@ -113,7 +115,7 @@ function relativeTime(ts) {
           </svg>
         </button>
 
-        <button class="close-folder-btn" @click="closeFolder" title="Cerrar carpeta">
+        <button class="close-folder-btn" @click="closeFolder" :title="t('titlebar.closeFolder')">
           <svg
             width="11"
             height="11"
@@ -129,7 +131,7 @@ function relativeTime(ts) {
 
         <Transition name="dropdown">
           <div v-if="showHistory" class="history-dropdown">
-            <div class="dropdown-header">Recientes</div>
+            <div class="dropdown-header">{{ t('titlebar.recents') }}</div>
             <button
               v-for="entry in folderHistory"
               :key="entry.path"
@@ -168,7 +170,7 @@ function relativeTime(ts) {
                 <button
                   class="history-remove"
                   @click="removeFolder($event, entry.path)"
-                  title="Eliminar"
+                  :title="t('titlebar.remove')"
                 >
                   <svg
                     width="10"
@@ -199,7 +201,7 @@ function relativeTime(ts) {
                   d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.764c.414 0 .811.162 1.104.451l.897.898A1.5 1.5 0 0 0 9.37 3.8H13.5A1.5 1.5 0 0 1 15 5.3v7.2A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5z"
                 />
               </svg>
-              Abrir otra carpeta…
+              {{ t('titlebar.openOther') }}
             </button>
           </div>
         </Transition>
@@ -212,7 +214,7 @@ function relativeTime(ts) {
         class="ctrl-btn open-btn"
         @click="openFolderDialog"
         :disabled="isLoading"
-        title="Abrir carpeta"
+        :title="t('titlebar.openFolder')"
       >
         <svg v-if="!isLoading" width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
           <path
@@ -231,13 +233,23 @@ function relativeTime(ts) {
         >
           <path d="M21 12a9 9 0 1 1-6.219-8.56" />
         </svg>
-        <span>{{ isLoading ? 'Cargando…' : 'Abrir carpeta' }}</span>
+        <span>{{ isLoading ? t('titlebar.loading') : t('titlebar.openFolder') }}</span>
       </button>
 
+      <!-- Language toggle -->
+      <button
+        class="ctrl-btn icon-btn lang-btn"
+        @click="$emit('toggle-locale')"
+        :title="locale === 'es' ? 'Switch to English' : 'Cambiar a Español'"
+      >
+        {{ locale === 'es' ? 'EN' : 'ES' }}
+      </button>
+
+      <!-- Theme toggle -->
       <button
         class="ctrl-btn icon-btn"
         @click="$emit('toggle-theme')"
-        :title="isDark ? 'Modo claro' : 'Modo oscuro'"
+        :title="isDark ? t('titlebar.themeLight') : t('titlebar.themeDark')"
       >
         <svg
           v-if="isDark"
@@ -280,7 +292,7 @@ function relativeTime(ts) {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 16px; /* default fallback */
+  padding: 0 16px;
   background: transparent;
   border-bottom: 1px solid var(--border-subtle);
   -webkit-app-region: drag;
@@ -288,11 +300,11 @@ function relativeTime(ts) {
   position: relative;
   z-index: 200;
 }
-/* Windows: 148px right padding = space for native WCO controls (3×46px) */
+/* Windows: right padding reserves space for native WCO controls (3 × 46px) */
 .titlebar.is-win {
   padding: 0 148px 0 16px;
 }
-/* macOS: normal padding, traffic-lights-spacer handles left offset */
+/* macOS: traffic-lights-spacer handles the left offset */
 .titlebar.is-mac {
   padding: 0 16px;
 }
@@ -634,6 +646,14 @@ input {
 }
 .icon-btn:hover {
   color: var(--text-primary);
+}
+
+.lang-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 6px 10px;
 }
 
 .spin {

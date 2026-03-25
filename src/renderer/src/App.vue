@@ -1,19 +1,21 @@
 <script setup>
 import { onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useTheme } from './composables/useTheme.js'
+import { useLocale } from './composables/useLocale.js'
 import { useVideoLibrary } from './composables/useVideoLibrary.js'
 import { initFavorites } from './composables/useFavorites.js'
 import TitleBar from './components/TitleBar.vue'
 import GalleryPanel from './components/GalleryPanel.vue'
 import EmptyState from './components/EmptyState.vue'
 
+const { t } = useI18n()
 const { isDark, toggle } = useTheme()
+const { locale, toggle: toggleLocale } = useLocale()
 const { init, isEmpty, isLoading, isInitializing, error, dismissError, openFolderDialog } =
   useVideoLibrary()
 
 onMounted(async () => {
-  // Initialize favorites from userData before loading the folder,
-  // so the gallery renders correct starred state on first paint.
   await initFavorites()
   await init()
 })
@@ -21,7 +23,12 @@ onMounted(async () => {
 
 <template>
   <div class="app-root">
-    <TitleBar :isDark="isDark" @toggle-theme="toggle" />
+    <TitleBar
+      :isDark="isDark"
+      :locale="locale"
+      @toggle-theme="toggle"
+      @toggle-locale="toggleLocale"
+    />
 
     <!-- Folder not found banner -->
     <Transition name="banner">
@@ -39,13 +46,14 @@ onMounted(async () => {
           <line x1="12" y1="16" x2="12.01" y2="16" />
         </svg>
         <span v-if="error.type === 'not_found'">
-          La carpeta <strong>{{ error.folder }}</strong> ya no existe o fue movida. Se eliminó del
-          historial.
+          {{ t('error.notFound', { folder: error.folder }) }}
         </span>
-        <span v-else>No se pudo leer la carpeta. Verifica los permisos.</span>
+        <span v-else>{{ t('error.readError') }}</span>
         <div class="banner-actions">
-          <button class="banner-btn accent" @click="openFolderDialog">Abrir otra</button>
-          <button class="banner-btn" @click="dismissError">Cerrar</button>
+          <button class="banner-btn accent" @click="openFolderDialog">
+            {{ t('error.openOther') }}
+          </button>
+          <button class="banner-btn" @click="dismissError">{{ t('error.close') }}</button>
         </div>
       </div>
     </Transition>
@@ -62,7 +70,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: transparent; /* acrylic: no tapar el efecto nativo del DWM */
+  background: transparent; /* don't block native acrylic/vibrancy effect */
   overflow: hidden;
 }
 
@@ -73,7 +81,6 @@ onMounted(async () => {
   position: relative;
 }
 
-/* ─── Error banner ────────────────────────────────────────────────────────── */
 .error-banner {
   display: flex;
   align-items: center;
@@ -130,7 +137,6 @@ onMounted(async () => {
   background: #c02820;
 }
 
-/* Banner transition */
 .banner-enter-active {
   transition:
     opacity 0.2s,
