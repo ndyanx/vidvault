@@ -1,16 +1,8 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, shell, clipboard } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, shell, clipboard, Menu } from 'electron'
 import { join, extname } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import {
-  readdirSync,
-  statSync,
-  createReadStream,
-  existsSync,
-  readFileSync,
-  mkdirSync,
-  renameSync
-} from 'fs'
-import { writeFile } from 'fs/promises'
+import { createReadStream, existsSync, mkdirSync, renameSync } from 'fs'
+import { readFile, writeFile, readdir, stat } from 'fs/promises'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { createHash } from 'crypto'
@@ -77,16 +69,16 @@ function getStatePath() {
 
 const DEFAULT_STATE = { lastFolder: null, folderHistory: [], favorites: [], theme: null }
 
-function loadState() {
+// #3 fix: async readFile instead of readFileSync
+async function loadState() {
   try {
     const p = getStatePath()
-    if (existsSync(p)) {
-      const parsed = JSON.parse(readFileSync(p, 'utf-8'))
-      // Merge with defaults so missing keys don't break older installs
-      return { ...DEFAULT_STATE, ...parsed }
-    }
+    const raw = await readFile(p, 'utf-8')
+    const parsed = JSON.parse(raw)
+    // Merge with defaults so missing keys don't break older installs
+    return { ...DEFAULT_STATE, ...parsed }
   } catch {
-    /* corrupt — start fresh */
+    /* file missing or corrupt — start fresh */
   }
   return { ...DEFAULT_STATE }
 }
@@ -104,31 +96,42 @@ function saveState(state) {
 }
 
 let appState = null
+let appStatePromise = null
 
+// #2 fix: lazy async loader — first call triggers the disk read; subsequent
+// calls return the in-memory object immediately via the resolved promise.
+// The state is NEVER read synchronously at module scope or at startup.
 function getState() {
-  if (!appState) appState = loadState()
-  return appState
+  if (appState) return Promise.resolve(appState)
+  if (!appStatePromise) {
+    appStatePromise = loadState().then((s) => {
+      appState = s
+      return s
+    })
+  }
+  return appStatePromise
 }
 
-function patchState(updater) {
-  const s = getState()
+async function patchState(updater) {
+  const s = await getState()
   updater(s)
   saveState(s)
   return s
 }
 
 // Thin key-based IPC API — renderer doesn't need to know the full state shape
-ipcMain.handle('store:get', (_event, key) => {
-  return getState()[key] ?? null
+ipcMain.handle('store:get', async (_event, key) => {
+  const s = await getState()
+  return s[key] ?? null
 })
 
-ipcMain.handle('store:set', (_event, key, value) => {
-  patchState((s) => {
+ipcMain.handle('store:set', async (_event, key, value) => {
+  await patchState((s) => {
     s[key] = value
   })
 })
 
-ipcMain.handle('store:getAll', () => {
+ipcMain.handle('store:getAll', async () => {
   return getState()
 })
 
@@ -176,20 +179,26 @@ function migrateFlatThumbnails(cache) {
 }
 
 let dimCacheMemory = null
+let dimCachePromise = null
 
-function loadCache() {
+// #3 fix: async readFile instead of readFileSync, with lazy promise to avoid
+// multiple concurrent reads.
+async function loadCache() {
   if (dimCacheMemory) return dimCacheMemory
-  try {
-    const p = getCachePath()
-    if (existsSync(p)) {
-      dimCacheMemory = JSON.parse(readFileSync(p, 'utf-8'))
+  if (!dimCachePromise) {
+    dimCachePromise = (async () => {
+      try {
+        const p = getCachePath()
+        const raw = await readFile(p, 'utf-8')
+        dimCacheMemory = JSON.parse(raw)
+      } catch {
+        /* file missing or corrupt — start fresh */
+        dimCacheMemory = {}
+      }
       return dimCacheMemory
-    }
-  } catch {
-    /* corrupt — start fresh */
+    })()
   }
-  dimCacheMemory = {}
-  return dimCacheMemory
+  return dimCachePromise
 }
 
 const debouncedWriteCache = debounce(async (cache) => {
@@ -338,7 +347,20 @@ async function generateThumbnail(filePath, duration) {
   try {
     await execFileAsync(
       'ffmpeg',
-      ['-ss', seekTime, '-i', filePath, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '2', '-y', outPath],
+      [
+        '-ss',
+        seekTime,
+        '-i',
+        filePath,
+        '-frames:v',
+        '1',
+        '-vf',
+        'scale=480:-2',
+        '-q:v',
+        '2',
+        '-y',
+        outPath
+      ],
       { timeout: 60000 }
     )
     return outPath
@@ -364,47 +386,53 @@ let watchTimer = null
 let watchedDir = null
 let watchSnapshot = new Map()
 
-function collectVideoEntries(dirPath) {
+// #3 fix: async readdir/stat instead of readdirSync/statSync
+async function collectVideoEntries(dirPath) {
   const found = new Map() // filePath → mtime
-  const walk = (currentPath) => {
+  const walk = async (currentPath) => {
     let entries
     try {
-      entries = readdirSync(currentPath, { withFileTypes: true })
+      entries = await readdir(currentPath, { withFileTypes: true })
     } catch {
       return
     }
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (!entry.name.startsWith('.')) walk(join(currentPath, entry.name))
-        continue
-      }
-      const dotIndex = entry.name.lastIndexOf('.')
-      if (dotIndex === -1) continue
-      const ext = entry.name.slice(dotIndex).toLowerCase()
-      if (!VIDEO_EXTENSIONS.has(ext)) continue
-      const fullPath = join(currentPath, entry.name)
-      try {
-        found.set(fullPath, statSync(fullPath).mtimeMs)
-      } catch {
-        // file disappeared between readdir and stat — skip
-      }
-    }
+    await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.isDirectory()) {
+          if (!entry.name.startsWith('.')) await walk(join(currentPath, entry.name))
+          return
+        }
+        const dotIndex = entry.name.lastIndexOf('.')
+        if (dotIndex === -1) return
+        const ext = entry.name.slice(dotIndex).toLowerCase()
+        if (!VIDEO_EXTENSIONS.has(ext)) return
+        const fullPath = join(currentPath, entry.name)
+        try {
+          const s = await stat(fullPath)
+          found.set(fullPath, s.mtimeMs)
+        } catch {
+          // file disappeared between readdir and stat — skip
+        }
+      })
+    )
   }
-  walk(dirPath)
+  await walk(dirPath)
   return found
 }
 
-function startFolderWatch(dirPath) {
+// #3 fix: startFolderWatch is now async; setInterval callback uses async IIFE
+async function startFolderWatch(dirPath) {
   stopFolderWatch()
   watchedDir = dirPath
-  watchSnapshot = collectVideoEntries(dirPath)
+  watchSnapshot = await collectVideoEntries(dirPath)
   try {
-    watchSnapshot._rootMtime = statSync(dirPath).mtimeMs
+    const s = await stat(dirPath)
+    watchSnapshot._rootMtime = s.mtimeMs
   } catch {
     watchSnapshot._rootMtime = 0
   }
 
-  watchTimer = setInterval(() => {
+  watchTimer = setInterval(async () => {
     if (!watchedDir) return
     const win = BrowserWindow.getAllWindows()[0]
     if (!win || win.isDestroyed()) {
@@ -414,14 +442,14 @@ function startFolderWatch(dirPath) {
 
     // Fast-path: skip full walk if root mtime hasn't changed
     try {
-      const rootMtime = statSync(watchedDir).mtimeMs
-      if (rootMtime === watchSnapshot._rootMtime) return
-      watchSnapshot._rootMtime = rootMtime
+      const s = await stat(watchedDir)
+      if (s.mtimeMs === watchSnapshot._rootMtime) return
+      watchSnapshot._rootMtime = s.mtimeMs
     } catch {
       // folder disappeared — let collectVideoEntries handle it
     }
 
-    const current = collectVideoEntries(watchedDir)
+    const current = await collectVideoEntries(watchedDir)
 
     const added = []
     const removed = []
@@ -430,6 +458,7 @@ function startFolderWatch(dirPath) {
       else if (watchSnapshot.get(p) !== mtime) added.push(p) // treat modified as re-add
     }
     for (const p of watchSnapshot.keys()) {
+      if (p === '_rootMtime') continue
       if (!current.has(p)) removed.push(p)
     }
 
@@ -449,8 +478,10 @@ function stopFolderWatch() {
   watchSnapshot = new Map()
 }
 
-function createWindow() {
-  const savedTheme = getState().theme
+// #2 fix: createWindow is async so it can await getState() without blocking
+// the main process synchronously at startup.
+async function createWindow() {
+  const savedTheme = (await getState()).theme
   const symbolColor = savedTheme === 'light' ? '#a09890' : '#8a8078'
 
   const win = new BrowserWindow({
@@ -507,18 +538,26 @@ if (!gotLock) {
   })
 }
 
-app.whenReady().then(() => {
-  protocol.handle('localvideo', (request) => {
+Menu.setApplicationMenu(null)
+
+// #2 fix: whenReady uses an async IIFE so we can await createWindow() without
+// converting the .then() callback itself into an async function, which is the
+// pattern Electron expects. getState() is kicked off lazily in the background
+// so it's warm by the time the renderer makes its first store:getAll call.
+app.whenReady().then(async () => {
+  // The localvideo protocol handler only serves local files; stat here is fine
+  // because it runs inside an async handler that is not the main event-loop tick.
+  protocol.handle('localvideo', async (request) => {
     try {
       const filePath = decodeURIComponent(request.url.slice('localvideo://local/'.length))
-      let stat
+      let fileStat
       try {
-        stat = statSync(filePath)
+        fileStat = await stat(filePath)
       } catch {
         return new Response('File not found', { status: 404 })
       }
 
-      const fileSize = stat.size
+      const fileSize = fileStat.size
       const ext = extname(filePath).toLowerCase()
       const mimeType =
         ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : MIME_TYPES[ext] || 'video/mp4'
@@ -564,10 +603,15 @@ app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.vidvault')
   app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
 
-  getState()
-  setImmediate(() => migrateFlatThumbnails(loadCache()))
+  // #2 fix: kick off the lazy state load in the background so it's warm by the
+  // time the renderer makes its first store:getAll call — but don't block startup.
+  // createWindow() will await getState() too, but by then the promise is already
+  // in flight so it resolves immediately from memory.
+  setImmediate(() => getState())
+  // Migrate thumbnails only after the cache is loaded, without blocking startup.
+  setImmediate(async () => migrateFlatThumbnails(await loadCache()))
 
-  createWindow()
+  await createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -586,10 +630,11 @@ ipcMain.on('pipeline:cancel', () => {
 
 // Reprioritize the processing queue based on current viewport.
 // filePaths are ordered: visible first, lookahead after.
-ipcMain.on('pipeline:process', (event, filePaths) => {
+// #3 fix: loadCache() is now async so we await it before reprioritizing.
+ipcMain.on('pipeline:process', async (event, filePaths) => {
   if (!Array.isArray(filePaths) || !filePaths.length) return
   if (!processor._onDone?.videoMap?.size) return
-  const cache = loadCache()
+  const cache = await loadCache()
   const myToken = pipelineToken
   const send = (channel, data) => {
     if (pipelineToken !== myToken) return
@@ -609,55 +654,59 @@ ipcMain.handle('dialog:openFolder', async () => {
   return result.filePaths[0]
 })
 
+// #3 fix: fs:readVideos handler — walk is now fully async with readdir/stat
 ipcMain.handle('fs:readVideos', async (event, dirPath) => {
   if (!dirPath) return []
   try {
-    if (!statSync(dirPath).isDirectory()) return { error: 'not_found' }
+    const s = await stat(dirPath)
+    if (!s.isDirectory()) return { error: 'not_found' }
   } catch {
     return { error: 'not_found' }
   }
 
   const rawVideos = []
-  const walk = (currentPath) => {
+  const walk = async (currentPath) => {
     let entries
     try {
-      entries = readdirSync(currentPath, { withFileTypes: true })
+      entries = await readdir(currentPath, { withFileTypes: true })
     } catch {
       return
     }
-    for (const entry of entries) {
-      const fullPath = join(currentPath, entry.name)
-      if (entry.isDirectory()) {
-        if (!entry.name.startsWith('.')) walk(fullPath)
-        continue
-      }
-      const dotIndex = entry.name.lastIndexOf('.')
-      if (dotIndex === -1) continue
-      const ext = entry.name.slice(dotIndex).toLowerCase()
-      if (!VIDEO_EXTENSIONS.has(ext)) continue
-      let fileStat
-      try {
-        fileStat = statSync(fullPath)
-      } catch {
-        continue
-      }
-      rawVideos.push({
-        id: Buffer.from(fullPath).toString('base64').replace(/[+/=]/g, '_'),
-        fileName: entry.name,
-        filePath: fullPath,
-        videoUrl: `localvideo://local/${encodeURIComponent(fullPath)}`,
-        size: fileStat.size,
-        mtime: fileStat.mtimeMs,
-        createdAt: fileStat.birthtimeMs || fileStat.ctimeMs,
-        modifiedAt: fileStat.mtimeMs,
-        ext: ext.slice(1).toUpperCase()
+    await Promise.all(
+      entries.map(async (entry) => {
+        const fullPath = join(currentPath, entry.name)
+        if (entry.isDirectory()) {
+          if (!entry.name.startsWith('.')) await walk(fullPath)
+          return
+        }
+        const dotIndex = entry.name.lastIndexOf('.')
+        if (dotIndex === -1) return
+        const ext = entry.name.slice(dotIndex).toLowerCase()
+        if (!VIDEO_EXTENSIONS.has(ext)) return
+        let fileStat
+        try {
+          fileStat = await stat(fullPath)
+        } catch {
+          return
+        }
+        rawVideos.push({
+          id: Buffer.from(fullPath).toString('base64').replace(/[+/=]/g, '_'),
+          fileName: entry.name,
+          filePath: fullPath,
+          videoUrl: `localvideo://local/${encodeURIComponent(fullPath)}`,
+          size: fileStat.size,
+          mtime: fileStat.mtimeMs,
+          createdAt: fileStat.birthtimeMs || fileStat.ctimeMs,
+          modifiedAt: fileStat.mtimeMs,
+          ext: ext.slice(1).toUpperCase()
+        })
       })
-    }
+    )
   }
-  walk(dirPath)
+  await walk(dirPath)
   rawVideos.sort((a, b) => b.modifiedAt - a.modifiedAt)
 
-  const cache = loadCache()
+  const cache = await loadCache()
 
   // Remove cache entries for files that no longer exist on disk
   const freshPaths = new Set(rawVideos.map((v) => v.filePath))
@@ -695,15 +744,16 @@ ipcMain.handle('fs:readVideos', async (event, dirPath) => {
   const videoMap = new Map(videos.map((v) => [v.filePath, v]))
   processor._onDone = { videoMap, cacheChanged: false }
 
-  startFolderWatch(dirPath)
+  startFolderWatch(dirPath).catch(console.error)
 
   return videos
 })
 
 // Returns a localvideo:// URL for the first available thumbnail in dirPath
-ipcMain.handle('store:getFolderThumb', (_event, dirPath) => {
+// #3 fix: loadCache() is async — handler is now async too
+ipcMain.handle('store:getFolderThumb', async (_event, dirPath) => {
   if (!dirPath) return null
-  const cache = loadCache()
+  const cache = await loadCache()
   const normalDir = dirPath.replace(/\\/g, '/')
   for (const filePath of Object.keys(cache)) {
     const normalFile = filePath.replace(/\\/g, '/')
