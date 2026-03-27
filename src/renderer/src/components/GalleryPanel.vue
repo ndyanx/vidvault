@@ -26,6 +26,7 @@ const sortBy = ref('date') // 'date' | 'name' | 'size' | 'duration'
 const hoveredId = ref(null)
 let seekInterval = null
 let activeVideoEl = null
+let pendingMetadataListener = null // reference kept so we can remove it on early leave
 
 function onCardEnter(event, video) {
   if (!video.videoUrl || !video.duration) return
@@ -41,6 +42,8 @@ function onCardEnter(event, video) {
   const step = Math.max(video.duration / 12, 1)
   // Wait for metadata so seeks don't get ignored
   const startSeeking = () => {
+    pendingMetadataListener = null
+    if (activeVideoEl !== el) return // left before metadata fired
     el.currentTime = t
     seekInterval = setInterval(() => {
       t = (t + step) % video.duration
@@ -50,6 +53,7 @@ function onCardEnter(event, video) {
   if (el.readyState >= 1) {
     startSeeking()
   } else {
+    pendingMetadataListener = startSeeking
     el.addEventListener('loadedmetadata', startSeeking, { once: true })
   }
 }
@@ -58,6 +62,12 @@ function onCardLeave() {
   clearInterval(seekInterval)
   seekInterval = null
   if (activeVideoEl) {
+    // Remove pending listener before clearing src to prevent a stale
+    // seekInterval being created after leave (memory leak fix)
+    if (pendingMetadataListener) {
+      activeVideoEl.removeEventListener('loadedmetadata', pendingMetadataListener)
+      pendingMetadataListener = null
+    }
     activeVideoEl.src = ''
     activeVideoEl = null
   }
@@ -585,7 +595,7 @@ onUnmounted(() => {
         </div>
       </TransitionGroup>
 
-      <div :class="{ 'modal-open': !!modalVideo }" :style="{ top: containerHeight + 8 + 'px' }">
+      <div class="gallery-footer" :class="{ 'modal-open': !!modalVideo }" :style="{ top: containerHeight + 8 + 'px' }">
         {{ t('gallery.videoCount', filteredVideos.length) }}
         <template v-if="filteredVideos.length !== videos.length">
           {{ t('gallery.of') }} {{ videos.length }}</template
